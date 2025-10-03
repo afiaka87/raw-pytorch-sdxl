@@ -6,3 +6,4 @@ weights/
 checkpoints/
 **/__pycache__/
 
+wandb/
