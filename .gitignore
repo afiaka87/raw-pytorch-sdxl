@@ -1,0 +1,8 @@
+*.egg-info/
+outputs/
+repomix-*
+*.log
+weights/
+checkpoints/
+**/__pycache__/
+
