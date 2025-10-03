@@ -1,0 +1,25 @@
+uv run python train_sdxl.py \
+	--data_dir '/home/sam/Data/dalle-blog-data/captioned-dalle/' \
+        --use_lora \
+        --lora_rank 16 \
+        --lora_target_mode all \
+	--batch_size 64 \
+	--gradient_accumulation_steps 8 \
+	--num_epochs 1 \
+	--learning_rate 1e-5 \
+	--min_snr_gamma 5.0 \
+	--warmup_steps 500 \
+	--precision bf16 \
+	--image_size 256 \
+	--center_crop \
+	--random_flip \
+	--log_interval=10 \
+	--validation_interval 100 \
+	--validation_caption_file 'examples/captioned-dalle/1k.txt' \
+        --validation_guidance_scale 7.5 \
+	--num_validation_images 16 \
+	--wandb_project 'raw-sdxl-dalle-blog' \
+	--device 'cuda' \
+	--num_workers 32 \
+	--seed 420 \
+	--save_interval 100
