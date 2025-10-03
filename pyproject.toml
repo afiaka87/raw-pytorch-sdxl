@@ -15,6 +15,7 @@ dependencies = [
     "wandb>=0.15.0",
     "huggingface-hub>=0.19.0",
     "diffusers>=0.35.1",
+    "webdataset>=0.2.0",
 ]
 
 [project.optional-dependencies]
