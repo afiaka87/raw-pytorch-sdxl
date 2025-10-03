@@ -50,9 +50,21 @@ def save_checkpoint(
     # Create directory if needed
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    # Save checkpoint
-    torch.save(checkpoint, path)
-    print(f"Saved checkpoint to {path}")
+    # Save checkpoint with error handling
+    try:
+        torch.save(checkpoint, path)
+        print(f"Saved checkpoint to {path}")
+        # Verify the file was saved
+        if os.path.exists(path):
+            file_size = os.path.getsize(path) / (1024 * 1024)  # Size in MB
+            print(f"  Checkpoint file size: {file_size:.2f} MB")
+        else:
+            print(f"  WARNING: Checkpoint file not found after saving!")
+    except Exception as e:
+        print(f"ERROR: Failed to save checkpoint to {path}")
+        print(f"  Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def load_checkpoint(
