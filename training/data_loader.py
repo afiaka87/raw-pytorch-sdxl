@@ -3,6 +3,7 @@ Data loaders for SDXL fine-tuning.
 
 Supports:
 - Simple image-caption pairs (folder structure)
+- WebDataset format (tar shards)
 - Custom datasets with __getitem__ interface
 """
 
@@ -12,6 +13,7 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional, Callable, Tuple
 import torchvision.transforms as T
+import io
 
 
 class ImageCaptionDataset(Dataset):
@@ -238,6 +240,106 @@ class BucketedImageCaptionDataset(Dataset):
         }
 
 
+def create_webdataset_loader(
+    data_dir: str,
+    image_size: int = 1024,
+    batch_size: int = 1,
+    num_workers: int = 4,
+    shuffle: bool = True,
+    center_crop: bool = True,
+    random_flip: bool = True,
+) -> DataLoader:
+    """
+    Create WebDataset loader for tar shards.
+
+    Args:
+        data_dir: Directory containing .tar shard files
+        image_size: Target image size (square)
+        batch_size: Batch size
+        num_workers: Number of data loading workers
+        shuffle: Whether to shuffle shards
+        center_crop: Whether to center crop images
+        random_flip: Whether to randomly flip images horizontally
+
+    Returns:
+        DataLoader instance
+    """
+    import webdataset as wds
+
+    # Build list of shard URLs
+    data_path = Path(data_dir)
+    shard_files = sorted(data_path.glob("*.tar"))
+
+    if len(shard_files) == 0:
+        raise ValueError(f"No .tar files found in {data_dir}")
+
+    # Convert to URLs (webdataset format)
+    urls = [str(f) for f in shard_files]
+
+    print(f"Found {len(urls)} webdataset shards in {data_dir}")
+
+    def decode_sample(sample):
+        """Decode webdataset sample to our format."""
+        # WebDataset groups files by key (basename without extension)
+        # After .decode(), images are PIL Images with keys like 'png', 'jpg', etc.
+        # Text files remain as strings with keys like 'txt'
+
+        # Handle different image formats (after decode, no dot prefix)
+        image = None
+        for ext in ['png', 'jpg', 'jpeg', 'webp']:
+            if ext in sample:
+                image = sample[ext]
+                break
+
+        if image is None:
+            raise ValueError(f"No image found in sample with key {sample.get('__key__', 'unknown')}")
+
+        caption = sample.get('txt', '')
+
+        # Transform PIL image to tensor
+        # Build transforms
+        transforms = []
+        if center_crop:
+            transforms.append(T.Resize(image_size, interpolation=T.InterpolationMode.BILINEAR))
+            transforms.append(T.CenterCrop(image_size))
+        else:
+            transforms.append(T.Resize((image_size, image_size), interpolation=T.InterpolationMode.BILINEAR))
+
+        if random_flip:
+            transforms.append(T.RandomHorizontalFlip(p=0.5))
+
+        transforms.append(T.ToTensor())
+        transforms.append(T.Normalize([0.5], [0.5]))
+
+        transform = T.Compose(transforms)
+        image_tensor = transform(image)
+
+        return {
+            "image": image_tensor,
+            "caption": caption,
+        }
+
+    # Create webdataset pipeline
+    # Use integer for shardshuffle (buffer size) or False to disable
+    shard_shuffle = 100 if shuffle else False
+    dataset = (
+        wds.WebDataset(urls, shardshuffle=shard_shuffle)
+        .decode("pil")  # Decode images as PIL, text as strings
+        .map(decode_sample)
+        .batched(batch_size, collation_fn=collate_fn)
+    )
+
+    # WebDataset returns an iterable, wrap in DataLoader
+    loader = wds.WebLoader(
+        dataset,
+        batch_size=None,  # batching done in dataset
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    return loader
+
+
 def collate_fn(batch):
     """Custom collate function for batching."""
     images = torch.stack([item["image"] for item in batch])
@@ -278,23 +380,43 @@ def create_dataloader(
     num_workers: int = 4,
     shuffle: bool = True,
     use_bucketing: bool = False,
+    use_webdataset: bool = None,
     **dataset_kwargs,
 ) -> DataLoader:
     """
     Create data loader for training.
 
     Args:
-        data_dir: Directory with image-caption pairs
+        data_dir: Directory with image-caption pairs or webdataset tar shards
         batch_size: Batch size
         image_size: Image resolution
         num_workers: Number of data loading workers
         shuffle: Whether to shuffle data
         use_bucketing: Whether to use aspect ratio bucketing
+        use_webdataset: Whether to use webdataset format (auto-detected if None)
         **dataset_kwargs: Additional arguments for dataset
 
     Returns:
         DataLoader instance
     """
+    # Auto-detect webdataset format
+    if use_webdataset is None:
+        data_path = Path(data_dir)
+        tar_files = list(data_path.glob("*.tar"))
+        use_webdataset = len(tar_files) > 0
+
+    # Use webdataset if tar files are present
+    if use_webdataset:
+        return create_webdataset_loader(
+            data_dir=data_dir,
+            image_size=image_size,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=shuffle,
+            **dataset_kwargs,
+        )
+
+    # Use regular dataset
     if use_bucketing:
         dataset = BucketedImageCaptionDataset(
             data_dir=data_dir,
