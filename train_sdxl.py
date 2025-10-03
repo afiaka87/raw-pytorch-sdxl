@@ -9,6 +9,7 @@ import argparse
 import torch
 import os
 from pathlib import Path
+from datetime import datetime
 
 # Import modules
 from sdxl.unet import UNet2DConditionModel
@@ -18,9 +19,10 @@ from sdxl.diffusion import DDPMScheduler
 from sdxl.lora import apply_lora_to_unet, get_lora_state_dict
 
 from training.data_loader import create_dataloader
-from training.train_loop import train_epoch, validate
+from training.train_loop import train_epoch, validate, train_step
 from training.ema import SimpleEMA
 from training.precision_util import get_dtype_from_str, print_memory_stats
+from training.lr_scheduler import WarmupScheduler
 from training.train_util import (
     save_checkpoint,
     load_checkpoint,
@@ -28,6 +30,11 @@ from training.train_util import (
     create_output_directory,
     save_config,
     count_parameters,
+)
+from training.lora_checkpoint import (
+    save_lora_checkpoint,
+    load_lora_checkpoint,
+    is_lora_checkpoint,
 )
 
 
@@ -72,8 +79,14 @@ def parse_args():
                        help="Adam beta1")
     parser.add_argument("--adam_beta2", type=float, default=0.999,
                        help="Adam beta2")
+    parser.add_argument("--8_bit_adam", action="store_true", dest="use_8bit_adam",
+                       help="Use 8-bit Adam from bitsandbytes (saves memory)")
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                        help="Max gradient norm for clipping")
+    parser.add_argument("--min_snr_gamma", type=float, default=5.0,
+                       help="Min-SNR gamma for loss weighting (None to disable, recommended: 5.0)")
+    parser.add_argument("--warmup_steps", type=int, default=500,
+                       help="Number of warmup steps (0 to disable)")
 
     # Precision arguments
     parser.add_argument("--precision", type=str, default="bf16",
@@ -110,6 +123,16 @@ def parse_args():
     parser.add_argument("--wandb_run_name", type=str, default=None,
                        help="W&B run name")
 
+    # Validation arguments
+    parser.add_argument("--validation_caption_file", type=str, default="examples/captioned-dalle/1k.txt",
+                       help="File containing captions for validation (one per line)")
+    parser.add_argument("--validation_interval", type=int, default=25,
+                       help="Generate validation images every N steps (0 to disable)")
+    parser.add_argument("--num_validation_images", type=int, default=4,
+                       help="Number of validation images to generate")
+    parser.add_argument("--validation_guidance_scale", type=float, default=7.5,
+                       help="CFG guidance scale for validation (7.5 is typical for SDXL)")
+
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use")
@@ -123,6 +146,17 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Print all arguments
+    print("=" * 80)
+    print("Training Configuration")
+    print("=" * 80)
+    args_dict = vars(args)
+    max_key_length = max(len(key) for key in args_dict.keys())
+    for key, value in sorted(args_dict.items()):
+        print(f"{key:<{max_key_length}} : {value}")
+    print("=" * 80)
+    print()
 
     # Set seed
     if args.seed is not None:
@@ -163,8 +197,20 @@ def main():
     else:
         unet = UNet2DConditionModel().to(device, dtype=dtype)
 
+    # Apply LoRA if requested (BEFORE gradient checkpointing!)
+    if args.use_lora:
+        print(f"Applying LoRA (rank={args.lora_rank}, alpha={args.lora_alpha})...")
+        unet = apply_lora_to_unet(
+            unet,
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            dropout=args.lora_dropout,
+            target_mode=args.lora_target_mode,
+        )
+
     # Enable gradient checkpointing manually to save memory
     # Wrap down/up blocks in checkpointing
+    # IMPORTANT: This must be done AFTER LoRA is applied!
     from torch.utils.checkpoint import checkpoint
 
     def make_checkpointed(module):
@@ -183,17 +229,6 @@ def main():
         make_checkpointed(block)
 
     print("Enabled gradient checkpointing on UNet blocks")
-
-    # Apply LoRA if requested
-    if args.use_lora:
-        print(f"Applying LoRA (rank={args.lora_rank}, alpha={args.lora_alpha})...")
-        unet = apply_lora_to_unet(
-            unet,
-            rank=args.lora_rank,
-            alpha=args.lora_alpha,
-            dropout=args.lora_dropout,
-            target_mode=args.lora_target_mode,
-        )
 
     # VAE (keep in FP32 for quality)
     # Use diffusers VAE since it's frozen (not part of training)
@@ -237,12 +272,39 @@ def main():
     print(f"  Trainable %: {100 * trainable_params / total_params:.2f}%\n")
 
     # Optimizer
-    optimizer = torch.optim.AdamW(
-        unet.parameters(),
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-    )
+    if args.use_8bit_adam:
+        try:
+            import bitsandbytes as bnb
+            print("Using 8-bit Adam from bitsandbytes")
+            optimizer = bnb.optim.Adam8bit(
+                unet.parameters(),
+                lr=args.learning_rate,
+                betas=(args.adam_beta1, args.adam_beta2),
+                weight_decay=args.adam_weight_decay,
+            )
+        except ImportError:
+            raise ImportError(
+                "bitsandbytes is not installed. Install it with:\n"
+                "  pip install bitsandbytes\n"
+                "or remove the --8_bit_adam flag to use standard AdamW"
+            )
+    else:
+        optimizer = torch.optim.AdamW(
+            unet.parameters(),
+            lr=args.learning_rate,
+            betas=(args.adam_beta1, args.adam_beta2),
+            weight_decay=args.adam_weight_decay,
+        )
+
+    # Learning rate scheduler with warmup
+    lr_scheduler = None
+    if args.warmup_steps > 0:
+        print(f"Using LR warmup for {args.warmup_steps} steps")
+        lr_scheduler = WarmupScheduler(
+            optimizer=optimizer,
+            warmup_steps=args.warmup_steps,
+            base_lr=args.learning_rate,
+        )
 
     # EMA
     ema_model = None
@@ -278,20 +340,131 @@ def main():
     global_step = 0
     start_epoch = 0
     if args.resume_from:
-        print(f"Resuming from {args.resume_from}...")
-        checkpoint_info = load_checkpoint(
-            args.resume_from,
-            model=unet,
-            optimizer=optimizer,
-            ema_model=ema_model,
-            device=device,
-        )
-        global_step = checkpoint_info["step"]
-        start_epoch = checkpoint_info["epoch"]
+        print(f"\nResuming from {args.resume_from}...")
+
+        # Check if this is a LoRA-only checkpoint
+        if is_lora_checkpoint(args.resume_from):
+            # This is a LoRA-only checkpoint
+            if not args.use_lora:
+                raise ValueError(
+                    f"Checkpoint {args.resume_from} contains only LoRA weights "
+                    f"but --use_lora is not set. Please add --use_lora to resume."
+                )
+
+            # Use the new load_lora_checkpoint utility
+            global_step, start_epoch, loaded_config = load_lora_checkpoint(
+                checkpoint_path=args.resume_from,
+                unet=unet,
+                optimizer=optimizer,
+                ema_model=ema_model,
+                device=device,
+                strict=False,  # Allow some flexibility in case model structure changed slightly
+            )
+
+            # Optionally validate configuration compatibility
+            if loaded_config:
+                # Check for major config mismatches
+                important_keys = ["lora_rank", "lora_alpha", "lora_target_mode", "precision", "image_size"]
+                for key in important_keys:
+                    if key in loaded_config and hasattr(args, key):
+                        loaded_val = loaded_config.get(key)
+                        current_val = getattr(args, key)
+                        if loaded_val != current_val:
+                            print(f"Warning: Config mismatch for {key}: "
+                                  f"checkpoint={loaded_val}, current={current_val}")
+
+        else:
+            # This is a full checkpoint, use existing load_checkpoint function
+            checkpoint_info = load_checkpoint(
+                args.resume_from,
+                model=unet,
+                optimizer=optimizer,
+                ema_model=ema_model,
+                device=device,
+            )
+            global_step = checkpoint_info["step"]
+            start_epoch = checkpoint_info["epoch"]
 
     # Print memory stats
     if device.type == "cuda":
         print_memory_stats(device)
+
+    # Sanity check: compute loss on first batch before training
+    print("\nRunning sanity check on first batch...")
+    try:
+        first_batch = next(iter(train_dataloader))
+        with torch.no_grad():
+            sanity_loss = train_step(
+                first_batch,
+                unet,
+                vae,
+                text_encoder,
+                noise_scheduler,
+                device=device,
+                dtype=dtype,
+                min_snr_gamma=args.min_snr_gamma,
+            )
+        print(f"Initial loss (should be ~0.05-0.15): {sanity_loss.item():.4f}")
+
+        if sanity_loss.item() > 1.0:
+            print("\n⚠️  WARNING: Initial loss is very high (>1.0)!")
+            print("   This usually indicates a problem with:")
+            print("   - VAE scaling (check that latents are properly scaled)")
+            print("   - Learning rate (current: {})".format(args.learning_rate))
+            print("   - Image preprocessing (check normalization)")
+            print("\n   Continuing anyway, but monitor closely...\n")
+        elif sanity_loss.item() < 0.01:
+            print("\n⚠️  WARNING: Initial loss is very low (<0.01)!")
+            print("   This might indicate an issue. Expected range: 0.05-0.15\n")
+
+    except Exception as e:
+        print(f"Sanity check failed: {e}")
+        print("Continuing with training anyway...")
+
+    # Define checkpoint saving callback
+    def save_checkpoint_callback(global_step, epoch):
+        """Save checkpoint at given step."""
+        # Generate timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if args.use_lora:
+            # For LoRA training, only save LoRA weights + optimizer + metadata
+            if epoch is not None:
+                checkpoint_name = f"lora_epoch{epoch:04d}_{timestamp}.pt"
+            else:
+                checkpoint_name = f"lora_step{global_step:06d}_{timestamp}.pt"
+
+            checkpoint_path = str(output_dir / checkpoint_name)
+
+            # Use the new save_lora_checkpoint utility
+            save_lora_checkpoint(
+                checkpoint_path=checkpoint_path,
+                unet=unet,
+                optimizer=optimizer,
+                global_step=global_step,
+                epoch=epoch if epoch is not None else start_epoch,
+                config=vars(args),
+                ema_model=ema_model,
+                get_lora_state_dict_fn=get_lora_state_dict,
+            )
+
+        else:
+            # For full model training, save everything
+            if epoch is not None:
+                checkpoint_name = f"checkpoint_epoch_{epoch:04d}.pt"
+            else:
+                checkpoint_name = f"checkpoint_step_{global_step:06d}.pt"
+
+            checkpoint_path = output_dir / checkpoint_name
+            save_checkpoint(
+                path=str(checkpoint_path),
+                model=unet,
+                optimizer=optimizer,
+                ema_model=ema_model,
+                step=global_step,
+                epoch=epoch if epoch is not None else start_epoch,
+                config=vars(args),
+            )
 
     # Training loop
     print("\nStarting training...\n")
@@ -314,6 +487,15 @@ def main():
             log_interval=args.log_interval,
             wandb_run=wandb_run,
             global_step=global_step,
+            min_snr_gamma=args.min_snr_gamma,
+            lr_scheduler=lr_scheduler,
+            validation_caption_file=args.validation_caption_file,
+            validation_interval=args.validation_interval,
+            validation_num_images=args.num_validation_images,
+            validation_guidance_scale=args.validation_guidance_scale,
+            image_size=args.image_size,
+            save_interval=args.save_interval,
+            save_callback=save_checkpoint_callback,
         )
 
         print(f"Epoch {epoch + 1} - Avg Loss: {avg_loss:.4f}")
@@ -335,43 +517,48 @@ def main():
                 from training.train_util import log_to_wandb
                 log_to_wandb({"val/loss": val_loss}, step=global_step, wandb_run=wandb_run)
 
-        # Save checkpoint
-        if (epoch + 1) % max(1, args.save_interval // len(train_dataloader)) == 0:
-            checkpoint_path = output_dir / f"checkpoint_epoch_{epoch + 1:04d}.pt"
-            save_checkpoint(
-                path=str(checkpoint_path),
-                model=unet,
-                optimizer=optimizer,
-                ema_model=ema_model,
-                step=global_step,
-                epoch=epoch + 1,
-                config=vars(args),
-            )
+        # Save checkpoint at epoch boundaries (every epoch for webdataset, or based on save_interval for regular datasets)
+        # WebDataset doesn't support len(), so we save every epoch
+        try:
+            save_frequency = max(1, args.save_interval // len(train_dataloader))
+        except TypeError:
+            # WebDataset doesn't have len(), save every epoch
+            save_frequency = 1
 
-            # Save LoRA weights separately
-            if args.use_lora:
-                lora_path = output_dir / f"lora_epoch_{epoch + 1:04d}.pt"
-                lora_state = get_lora_state_dict(unet)
-                torch.save(lora_state, lora_path)
-                print(f"Saved LoRA weights to {lora_path}")
+        if (epoch + 1) % save_frequency == 0:
+            save_checkpoint_callback(global_step=global_step, epoch=epoch + 1)
 
     # Final checkpoint
-    final_path = output_dir / "checkpoint_final.pt"
-    save_checkpoint(
-        path=str(final_path),
-        model=unet,
-        optimizer=optimizer,
-        ema_model=ema_model,
-        step=global_step,
-        epoch=args.num_epochs,
-        config=vars(args),
-    )
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if args.use_lora:
-        final_lora_path = output_dir / "lora_final.pt"
-        lora_state = get_lora_state_dict(unet)
-        torch.save(lora_state, final_lora_path)
-        print(f"Saved final LoRA weights to {final_lora_path}")
+        # Save final LoRA checkpoint with timestamp
+        final_path = str(output_dir / f"lora_final_{timestamp}.pt")
+
+        # Use the save_lora_checkpoint utility
+        save_lora_checkpoint(
+            checkpoint_path=final_path,
+            unet=unet,
+            optimizer=optimizer,
+            global_step=global_step,
+            epoch=args.num_epochs,
+            config=vars(args),
+            ema_model=ema_model,
+            get_lora_state_dict_fn=get_lora_state_dict,
+        )
+
+    else:
+        # For full model training, save everything
+        final_path = output_dir / "checkpoint_final.pt"
+        save_checkpoint(
+            path=str(final_path),
+            model=unet,
+            optimizer=optimizer,
+            ema_model=ema_model,
+            step=global_step,
+            epoch=args.num_epochs,
+            config=vars(args),
+        )
 
     print("\nTraining complete!")
     print(f"Checkpoints saved to: {output_dir}")
