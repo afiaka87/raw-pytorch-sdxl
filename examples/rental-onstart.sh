@@ -29,9 +29,11 @@ mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
 mkdir Data/ && uvx b2 sync b2://dalle-blog-data/ Data/
 
 ## Weights Download
-~/Code/raw-pytorch-sdxl/
+```sh
+cd ~/Code/raw-pytorch-sdxl/
 uv sync
 uv add "huggingface_hub[cli]"
 hf --help
 hf auth login
-
+bash download_weights.sh
+```
