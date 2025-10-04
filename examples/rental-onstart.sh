@@ -9,7 +9,7 @@ su - sam
 whoami
 ```
 
-## SSH
+## user remote ssh
 
 ```sh
 mkdir -p /home/sam/.ssh
@@ -21,15 +21,23 @@ chmod 600 /home/sam/authorized_keys
 chown -R sam:sam /home/sam/.ssh
 ```
 
-## Code
-```
+## code
+```sh
+ssh-keygen
+cat ~/.ssh/id_edjfdk.pub
+# paste into github settings
+
 mkdir Code/
 git clone git@github.com:afiaka87/raw-pytorch-sdxl.git
 ```
 
 ## Checkpoint Download
+```sh
+uvx b2 account authorize
 mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
 mkdir Data/ && uvx b2 sync b2://dalle-blog-data/ Data/
+```
+
 
 ## Weights Download
 ```sh
