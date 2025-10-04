@@ -1,6 +1,6 @@
 # Startup Steps
 
-## Sudo User
+## sudo user
 ```sh
 adduser sam
 usermod -aG sudo sam
@@ -31,7 +31,7 @@ mkdir Code/
 git clone git@github.com:afiaka87/raw-pytorch-sdxl.git
 ```
 
-## Checkpoint Download
+## checkpoint download
 ```sh
 uvx b2 account authorize
 mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
@@ -39,7 +39,7 @@ mkdir Data/ && uvx b2 sync b2://dalle-blog-data/ Data/
 ```
 
 
-## Weights Download
+## weights download
 ```sh
 cd ~/Code/raw-pytorch-sdxl/
 uv sync
