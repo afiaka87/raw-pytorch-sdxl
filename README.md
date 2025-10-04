@@ -2,17 +2,6 @@
 
 A minimal, pure PyTorch implementation for fine-tuning Stable Diffusion XL with LoRA.
 
-## Features
-
-- Pure PyTorch implementation (no diffusers/peft/accelerate for training code)
-- Custom LoRA implementation for parameter-efficient fine-tuning
-- BF16 mixed precision training
-- Gradient checkpointing for memory efficiency
-- Supports GPUs with <12GB VRAM (at 512x512 resolution)
-- Multi-GPU parallel inference (4x speedup with 4 GPUs)
-- COCO-style dataset output for generated images
-- Compatible with HuggingFace SDXL weights
-
 ## Quick Start
 
 ### 1. Download SDXL weights
