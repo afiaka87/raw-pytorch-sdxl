@@ -1,6 +1,5 @@
 # Startup Steps
 
-
 ## Sudo User
 ```sh
 adduser sam
@@ -21,8 +20,12 @@ vim /home/sam/.ssh/authorized_keys
 chmod 600 /home/sam/authorized_keys
 chown -R sam:sam /home/sam/.ssh
 ```
+
+## Code
+```
 mkdir Code/
 git clone git@github.com:afiaka87/raw-pytorch-sdxl.git
+```
 
 ## Checkpoint Download
 mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
