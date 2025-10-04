@@ -34,6 +34,28 @@ uv run python train_sdxl.py \
   --output_dir ./outputs \
   --pretrained_model ./weights/sdxl-base-1.0 \
   --image_size 512
+
+# Resume from LoRA checkpoint
+uv run python resume_training.py --auto checkpoints/latest/ --execute
+```
+
+### Inference & Generation
+```bash
+# Generate images with LoRA
+uv run python generate_images.py \
+  --lora-checkpoint lora_step_1800_lowest_loss.pt \
+  --prompt-file captions.txt \
+  --num-images 100 \
+  --batch-size 4 \
+  --image-size 512 \
+  --output-dir ./generated_dataset
+
+# Single prompt generation
+uv run python generate_images.py \
+  --lora-checkpoint my_lora.pt \
+  --prompt "a beautiful landscape" \
+  --num-images 10 \
+  --image-size 768x512
 ```
 
 ### Code Quality
@@ -67,13 +89,17 @@ mypy .
 - `train_util.py`: Checkpointing, W&B logging, utilities
 
 **`sampling/`** - Inference
-- `inference.py`: Image generation from trained models
+- `inference.py`: Core generation functions with LoRA support, batch processing, and prompt file loading
 
 **`minSDXL/`** - Reference implementation (vendored, Apache 2.0)
 - Original minSDXL implementation used as reference
 - Not actively used in main training pipeline
 
-**`train_sdxl.py`** - Main training script entry point
+**Scripts**:
+- `train_sdxl.py`: Main training script entry point
+- `generate_images.py`: Image generation with LoRA, batch processing, COCO-style output
+- `resume_training.py`: Checkpoint inspection and training resumption helper
+- `extract_lora_weights.py`: Extract weights-only files from training checkpoints
 
 ### Critical Implementation Details
 
@@ -178,18 +204,77 @@ WebDataset format is **auto-detected** if .tar files are present in the data dir
 
 ## Output Files
 
+### Training Outputs
 Training produces:
-- `lora_final.pt`: LoRA weights only (~9MB for rank 4)
-- `checkpoint_final.pt`: Full checkpoint with optimizer state
+- `lora_step{XXXXXX}_{timestamp}.pt`: LoRA checkpoints with optimizer state (~20MB for rank 16)
+- `lora_epoch{XXXX}_{timestamp}.pt`: Epoch-based checkpoints
 - `config.json`: Training configuration
+
+### Generation Outputs (COCO-style)
+```
+output_dir/
+├── 00000.png          # Generated image
+├── 00000.txt          # Caption/prompt used
+├── 00000.json         # Optional: metadata for this image
+├── 00001.png
+├── 00001.txt
+├── 00001.json
+├── 00002.png
+├── 00002.txt
+├── 00002.json
+...
+```
+
+Each numbered basename groups related files (image, caption, metadata).
 
 ## Common Issues & Solutions
 
+### Training Issues
 1. **OOM on 1024x1024**: Reduce to 512x512 or increase VRAM
 2. **LoRA params not training**: Check freeze order (freeze base → apply LoRA → unfreeze LoRA)
 3. **LoRA on CPU**: LoRA layers created before device move - fixed in current impl
 4. **Dtype mismatches**: Ensure manual dtype conversion in forward passes
 5. **VAE architecture mismatch**: Always use diffusers VAE, not custom implementation
+6. **Checkpoints not saving**: Ensure `--save_interval` is set for step-based saving with large datasets
+
+### Inference Issues
+1. **CUDA index errors with batch>1**: Create fresh scheduler for each batch (scheduler state gets modified)
+2. **VAE decode returns DecoderOutput**: Access `.sample` attribute and divide by `vae.config.scaling_factor`
+3. **Text encoder dtype issues**: Use `torch_dtype` parameter, not `dtype`
+4. **Batch processing different prompts**: Use `generate_unique_batch()` not standard `generate()`
+5. **LoRA not applying**: Ensure `apply_lora_to_unet()` called AFTER freezing base model
+
+## Inference & Generation Pipeline
+
+### Key Implementation Details
+
+1. **LoRA Loading for Inference** (`sampling/inference.py`)
+   - Load checkpoint with `torch.load(path, map_location="cpu")`
+   - Apply LoRA structure to UNet AFTER freezing base weights
+   - Load LoRA state dict with `load_lora_state_dict()`
+   - Move to target device/dtype after loading
+
+2. **Unique-Pair Batch Processing**
+   - Standard `generate()`: Multiple images from SAME prompt
+   - `generate_unique_batch()`: Each image gets DIFFERENT prompt
+   - Enables efficient parallel processing of diverse prompts
+   - Each image in batch gets unique random seed (base_seed + index)
+
+3. **Scheduler State Management**
+   - **CRITICAL**: Create fresh scheduler instance for each batch
+   - Scheduler's internal state (sigmas, timesteps) gets modified during generation
+   - Reusing scheduler across batches causes CUDA index errors
+
+4. **VAE Decoding**
+   - VAE returns `DecoderOutput` object, not raw tensor
+   - Access decoded images via `.sample` attribute
+   - Scale latents by `1 / vae.config.scaling_factor` before decoding
+   - Keep VAE in FP32 for quality
+
+5. **Prompt File Processing**
+   - Supports line-separated text files (one prompt per line)
+   - Can shuffle prompts with seed for reproducibility
+   - Automatically cycles prompts if requesting more images than available prompts
 
 ## Development Notes
 
@@ -198,6 +283,8 @@ Training produces:
 - Gradient checkpointing alone insufficient for <12GB VRAM at full resolution
 - LoRA rank 4 with alpha 16 is the sweet spot (0.17% of model, sufficient expressiveness)
 - BF16 more stable than FP16 (no loss scaling needed)
+- Generation batch size 4 works well at 512x512 on 24GB VRAM
+- COCO-style output enables direct use as training dataset
 
 ## References
 
