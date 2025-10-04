@@ -21,10 +21,17 @@ vim /home/sam/.ssh/authorized_keys
 chmod 600 /home/sam/authorized_keys
 chown -R sam:sam /home/sam/.ssh
 ```
-mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
 mkdir Code/
 git clone git@github.com:afiaka87/raw-pytorch-sdxl.git
+
+## Checkpoint Download
+mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
 mkdir Data/ && uvx b2 sync b2://dalle-blog-data/ Data/
 
-
+## Weights Download
+~/Code/raw-pytorch-sdxl/
+uv sync
+uv add "huggingface_hub[cli]"
+hf --help
+hf auth login
 
