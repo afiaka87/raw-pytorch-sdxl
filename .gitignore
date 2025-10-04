@@ -7,3 +7,17 @@ checkpoints/
 **/__pycache__/
 
 wandb/
+
+# Generated outputs and test data
+test_generation/
+dalle-blog-xl/
+dalle-blog-xl.txt
+output_captions.txt
+
+# Model checkpoints
+*.pt
+*.safetensors
+*.ckpt
+
+# Dataset files
+*.tar
