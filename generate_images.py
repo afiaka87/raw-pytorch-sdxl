@@ -53,41 +53,44 @@ def save_coco_style(
     metadata: Optional[dict] = None,
 ):
     """
-    Save images in COCO-style format with numbered directories.
+    Save images in COCO-style format with numbered files.
 
     Structure:
         output_dir/
-            00000/
-                image.png
-                caption.txt
-                metadata.json (optional)
-            00001/
-                ...
+            00000.png
+            00000.txt
+            00000.json (optional metadata)
+            00001.png
+            00001.txt
+            00001.json
+            ...
     """
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     for i, (image, prompt) in enumerate(zip(images, prompts)):
-        # Create numbered directory
+        # Generate numbered filename
         idx = start_index + i
-        dir_name = f"{idx:05d}"
-        item_dir = output_dir / dir_name
-        item_dir.mkdir(parents=True, exist_ok=True)
+        base_name = f"{idx:05d}"
 
         # Save image
-        image_path = item_dir / "image.png"
+        image_path = output_dir / f"{base_name}.png"
         image.save(image_path)
 
         # Save caption
-        caption_path = item_dir / "caption.txt"
+        caption_path = output_dir / f"{base_name}.txt"
         with open(caption_path, 'w', encoding='utf-8') as f:
             f.write(prompt)
 
         # Save metadata if provided
         if metadata:
-            meta_path = item_dir / "metadata.json"
+            meta_path = output_dir / f"{base_name}.json"
             item_metadata = {
                 **metadata,
                 "index": idx,
                 "prompt": prompt,
-                "image_path": str(image_path.name),
+                "image_file": f"{base_name}.png",
+                "caption_file": f"{base_name}.txt",
             }
             with open(meta_path, 'w') as f:
                 json.dump(item_metadata, f, indent=2)
@@ -376,7 +379,7 @@ def main():
             start_index=0,
             metadata=metadata,
         )
-        print(f"Saved in COCO format: {output_dir}/00000/ to {output_dir}/{len(all_images)-1:05d}/")
+        print(f"Saved in COCO format: {output_dir}/00000.png to {output_dir}/{len(all_images)-1:05d}.png")
     else:
         # Simple format - just save images
         for i, (image, prompt) in enumerate(zip(all_images, all_prompts)):
