@@ -31,10 +31,9 @@ mkdir Code/
 git clone git@github.com:afiaka87/raw-pytorch-sdxl.git
 ```
 
-## checkpoint download
+## uvx b2 authorize and download data
 ```sh
 uvx b2 account authorize
-mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
 mkdir Data/ && uvx b2 sync b2://dalle-blog-data/ Data/
 ```
 
@@ -42,9 +41,11 @@ mkdir Data/ && uvx b2 sync b2://dalle-blog-data/ Data/
 ## weights download
 ```sh
 cd ~/Code/raw-pytorch-sdxl/
-uv sync
 uv add "huggingface_hub[cli]"
 hf --help
 hf auth login
+# Download LoRA checkpoint
+mkdir Checkpoints/ && uvx b2 sync b2://dalle-blog-sdxl/ Checkpoints/
+# Download SDXL full weights
 bash download_weights.sh
 ```
