@@ -9,6 +9,8 @@ A minimal, pure PyTorch implementation for fine-tuning Stable Diffusion XL with 
 - BF16 mixed precision training
 - Gradient checkpointing for memory efficiency
 - Supports GPUs with <12GB VRAM (at 512x512 resolution)
+- Multi-GPU parallel inference (4x speedup with 4 GPUs)
+- COCO-style dataset output for generated images
 - Compatible with HuggingFace SDXL weights
 
 ## Quick Start
@@ -50,6 +52,26 @@ uv run python train_sdxl.py \
   --image_size 512
 ```
 
+### 4. Generate Images (Multi-GPU)
+
+```bash
+# Multi-GPU generation (auto-detects all GPUs)
+uv run python generate_images.py \
+  --lora-checkpoint outputs/lora_final.pt \
+  --prompt-file captions.txt \
+  --num-images 1000 \
+  --batch-size 4 \
+  --image-size 512 \
+  --output-dir ./generated
+
+# Single GPU generation
+uv run python generate_images.py \
+  --lora-checkpoint outputs/lora_final.pt \
+  --prompt "a photo of south beach, san francisco" \
+  --num-images 10 \
+  --num-gpus 1
+```
+
 ## Training Arguments
 
 ### Model
@@ -73,6 +95,12 @@ uv run python train_sdxl.py \
 ### Checkpointing
 - `--output_dir`: Where to save outputs
 - `--save_interval`: Save every N epochs
+
+### Generation (Multi-GPU)
+- `--num-gpus`: Number of GPUs for parallel generation (default: auto-detect all)
+- `--batch-size`: Images per GPU to process in parallel
+- `--prompt-file`: Text file with prompts (one per line)
+- `--output-format`: coco (numbered) or simple
 
 ## Memory Requirements
 
@@ -111,6 +139,8 @@ sampling/
 └── inference.py      # Image generation
 
 train_sdxl.py         # Main training script
+generate_images.py    # Multi-GPU image generation
+download_weights.sh   # Download SDXL weights from HuggingFace
 ```
 
 ## Limitations

@@ -7,10 +7,12 @@ Supports:
 - Batch generation with unique prompts
 - COCO-style dataset output (numbered dirs with image + caption)
 - Multiple resolutions
+- Multi-GPU parallelization
 """
 
 import argparse
 import torch
+import torch.multiprocessing as mp
 import os
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -96,8 +98,150 @@ def save_coco_style(
                 json.dump(item_metadata, f, indent=2)
 
 
+def worker_generate(
+    gpu_id: int,
+    prompts: List[str],
+    args_dict: dict,
+    output_dir: Path,
+    start_index: int,
+    metadata: Optional[dict],
+):
+    """
+    Worker function to generate images on a specific GPU.
+
+    Args:
+        gpu_id: GPU device ID to use
+        prompts: List of prompts for this worker
+        args_dict: Dictionary of generation arguments
+        output_dir: Output directory for images
+        start_index: Starting index for naming files
+        metadata: Metadata to save with images
+    """
+    # Set device for this worker
+    device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(gpu_id)
+
+    # Extract args
+    pretrained_model = args_dict['pretrained_model']
+    lora_checkpoint = args_dict.get('lora_checkpoint')
+    width = args_dict['width']
+    height = args_dict['height']
+    batch_size = args_dict['batch_size']
+    num_inference_steps = args_dict['num_inference_steps']
+    guidance_scale = args_dict['guidance_scale']
+    negative_prompt = args_dict['negative_prompt']
+    scheduler_type = args_dict['scheduler']
+    dtype = args_dict['dtype']
+    seed = args_dict.get('seed')
+
+    # Load models on this GPU
+    print(f"[GPU {gpu_id}] Loading models...")
+
+    # Load UNet
+    unet = UNet2DConditionModel.from_pretrained(
+        pretrained_model,
+        torch_dtype=dtype,
+        device=device,
+    )
+
+    # Apply LoRA if provided
+    if lora_checkpoint:
+        print(f"[GPU {gpu_id}] Applying LoRA from {lora_checkpoint}...")
+        unet, lora_info = load_and_apply_lora(
+            unet,
+            lora_checkpoint,
+            device=device,
+            dtype=dtype,
+        )
+
+    # Load VAE (always FP32)
+    from diffusers import AutoencoderKL
+    vae = AutoencoderKL.from_pretrained(
+        pretrained_model,
+        subfolder="vae",
+        torch_dtype=torch.float32,
+    )
+    vae = vae.to(device)
+    vae.eval()
+
+    # Load text encoders
+    text_encoder = SDXLTextEncoder(
+        device=device,
+        torch_dtype=torch.float16,
+        model_path=pretrained_model,
+    )
+
+    print(f"[GPU {gpu_id}] Generating {len(prompts)} images...")
+
+    # Generate images in batches
+    all_images = []
+    all_prompts = []
+
+    with torch.inference_mode():
+        for batch_start in tqdm(range(0, len(prompts), batch_size), desc=f"GPU {gpu_id}"):
+            batch_end = min(batch_start + batch_size, len(prompts))
+            batch_prompts = prompts[batch_start:batch_end]
+
+            # Create fresh scheduler for each batch
+            if scheduler_type == "euler":
+                scheduler = EulerDiscreteScheduler()
+            else:
+                scheduler = DDIMScheduler()
+
+            # Generate batch
+            if batch_size == 1 or len(batch_prompts) == 1:
+                images = generate(
+                    prompt=batch_prompts[0],
+                    unet=unet,
+                    vae=vae,
+                    text_encoder=text_encoder,
+                    scheduler=scheduler,
+                    height=height,
+                    width=width,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    negative_prompt=negative_prompt,
+                    num_images_per_prompt=1,
+                    device=device,
+                    dtype=dtype,
+                    seed=(seed + start_index + batch_start) if seed else None,
+                )
+                used_prompts = [batch_prompts[0]]
+            else:
+                images, used_prompts = generate_unique_batch(
+                    prompts=batch_prompts,
+                    unet=unet,
+                    vae=vae,
+                    text_encoder=text_encoder,
+                    scheduler=scheduler,
+                    height=height,
+                    width=width,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    negative_prompt=negative_prompt,
+                    device=device,
+                    dtype=dtype,
+                    seed=(seed + start_index + batch_start) if seed else None,
+                )
+
+            all_images.extend(images)
+            all_prompts.extend(used_prompts)
+
+    # Save images from this worker
+    print(f"[GPU {gpu_id}] Saving {len(all_images)} images...")
+    save_coco_style(
+        all_images,
+        all_prompts,
+        output_dir,
+        start_index=start_index,
+        metadata=metadata,
+    )
+
+    print(f"[GPU {gpu_id}] Complete!")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate images with SDXL + LoRA")
+    parser = argparse.ArgumentParser(description="Generate images with SDXL + LoRA (Multi-GPU)")
 
     # Model paths
     parser.add_argument(
@@ -195,7 +339,13 @@ def main():
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to use",
+        help="Device to use (ignored if --num-gpus > 1)",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=None,
+        help="Number of GPUs to use for parallel generation (default: auto-detect all available)",
     )
     parser.add_argument(
         "--precision",
@@ -250,48 +400,22 @@ def main():
     else:
         parser.error("Either --prompt or --prompt-file must be specified")
 
-    # Load models
-    print("Loading models...")
+    # Determine number of GPUs to use
+    num_gpus_available = torch.cuda.device_count()
+    if args.num_gpus is None:
+        num_gpus = num_gpus_available
+    else:
+        num_gpus = min(args.num_gpus, num_gpus_available)
 
-    # Load UNet
-    print("Loading UNet...")
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model,
-        torch_dtype=dtype,
-        device=args.device,
-    )
+    if num_gpus == 0:
+        parser.error("No GPUs available. This script requires CUDA.")
 
-    # Apply LoRA if provided
-    lora_info = None
-    if args.lora_checkpoint:
-        print(f"Applying LoRA from {args.lora_checkpoint}...")
-        unet, lora_info = load_and_apply_lora(
-            unet,
-            args.lora_checkpoint,
-            device=args.device,
-            dtype=dtype,
-        )
-        print(f"LoRA loaded: rank={lora_info['lora_rank']}, alpha={lora_info['lora_alpha']}")
-        print(f"Checkpoint step={lora_info['step']}, epoch={lora_info['epoch']}")
-
-    # Load VAE (always FP32 for quality)
-    print("Loading VAE...")
-    from diffusers import AutoencoderKL
-    vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model,
-        subfolder="vae",
-        torch_dtype=torch.float32,
-    )
-    vae = vae.to(args.device)
-    vae.eval()
-
-    # Load text encoders
-    print("Loading text encoders...")
-    text_encoder = SDXLTextEncoder(
-        device=args.device,
-        torch_dtype=torch.float16,
-        model_path=args.pretrained_model,
-    )
+    print(f"\n=== Multi-GPU Configuration ===")
+    print(f"Available GPUs: {num_gpus_available}")
+    print(f"Using GPUs: {num_gpus}")
+    print(f"Total prompts: {len(prompts)}")
+    print(f"Batch size per GPU: {args.batch_size}")
+    print(f"================================\n")
 
     # Prepare metadata
     metadata = None
@@ -299,7 +423,6 @@ def main():
         metadata = {
             "model": args.pretrained_model,
             "lora_checkpoint": args.lora_checkpoint,
-            "lora_info": lora_info,
             "width": width,
             "height": height,
             "guidance_scale": args.guidance_scale,
@@ -309,99 +432,83 @@ def main():
             "negative_prompt": args.negative_prompt,
         }
 
-    # Generate images in batches
-    print(f"\nGenerating {args.num_images} images in batches of {args.batch_size}...")
+    # Prepare arguments dict for workers
+    args_dict = {
+        'pretrained_model': args.pretrained_model,
+        'lora_checkpoint': args.lora_checkpoint,
+        'width': width,
+        'height': height,
+        'batch_size': args.batch_size,
+        'num_inference_steps': args.num_inference_steps,
+        'guidance_scale': args.guidance_scale,
+        'negative_prompt': args.negative_prompt,
+        'scheduler': args.scheduler,
+        'dtype': dtype,
+        'seed': args.seed,
+    }
 
-    all_images = []
-    all_prompts = []
-
-    with torch.inference_mode():
-        for batch_start in tqdm(range(0, args.num_images, args.batch_size)):
-            batch_end = min(batch_start + args.batch_size, args.num_images)
-            batch_prompts = prompts[batch_start:batch_end]
-
-            # Create fresh scheduler for each batch
-            if args.scheduler == "euler":
-                scheduler = EulerDiscreteScheduler()
-            else:
-                scheduler = DDIMScheduler()
-
-            # Generate batch with unique prompts
-            if args.batch_size == 1 or len(batch_prompts) == 1:
-                # Single image generation
-                images = generate(
-                    prompt=batch_prompts[0],
-                    unet=unet,
-                    vae=vae,
-                    text_encoder=text_encoder,
-                    scheduler=scheduler,
-                    height=height,
-                    width=width,
-                    num_inference_steps=args.num_inference_steps,
-                    guidance_scale=args.guidance_scale,
-                    negative_prompt=args.negative_prompt,
-                    num_images_per_prompt=1,
-                    device=args.device,
-                    dtype=dtype,
-                    seed=(args.seed + batch_start) if args.seed else None,
-                )
-                used_prompts = [batch_prompts[0]]
-            else:
-                # Batch generation with unique prompts
-                images, used_prompts = generate_unique_batch(
-                    prompts=batch_prompts,
-                    unet=unet,
-                    vae=vae,
-                    text_encoder=text_encoder,
-                    scheduler=scheduler,
-                    height=height,
-                    width=width,
-                    num_inference_steps=args.num_inference_steps,
-                    guidance_scale=args.guidance_scale,
-                    negative_prompt=args.negative_prompt,
-                    device=args.device,
-                    dtype=dtype,
-                    seed=(args.seed + batch_start) if args.seed else None,
-                )
-
-            all_images.extend(images)
-            all_prompts.extend(used_prompts)
-
-    # Save images
-    print(f"\nSaving {len(all_images)} images to {output_dir}...")
-
-    if args.output_format == "coco":
-        # COCO-style numbered directories
-        save_coco_style(
-            all_images,
-            all_prompts,
-            output_dir,
+    if num_gpus == 1:
+        # Single GPU - use original sequential approach
+        print("Using single GPU mode...")
+        worker_generate(
+            gpu_id=0,
+            prompts=prompts,
+            args_dict=args_dict,
+            output_dir=output_dir,
             start_index=0,
             metadata=metadata,
         )
-        print(f"Saved in COCO format: {output_dir}/00000.png to {output_dir}/{len(all_images)-1:05d}.png")
     else:
-        # Simple format - just save images
-        for i, (image, prompt) in enumerate(zip(all_images, all_prompts)):
-            image_path = output_dir / f"image_{i:05d}.png"
-            image.save(image_path)
+        # Multi-GPU parallel generation
+        print(f"Splitting {len(prompts)} prompts across {num_gpus} GPUs...")
 
-            # Optionally save prompt
-            prompt_path = output_dir / f"image_{i:05d}.txt"
-            with open(prompt_path, 'w', encoding='utf-8') as f:
-                f.write(prompt)
+        # Split prompts among GPUs
+        prompts_per_gpu = len(prompts) // num_gpus
+        prompt_splits = []
+        start_indices = []
 
-        print(f"Saved images: {output_dir}/image_00000.png to {output_dir}/image_{len(all_images)-1:05d}.png")
+        for i in range(num_gpus):
+            start = i * prompts_per_gpu
+            if i == num_gpus - 1:
+                # Last GPU gets any remaining prompts
+                end = len(prompts)
+            else:
+                end = (i + 1) * prompts_per_gpu
 
-    print("\nGeneration complete!")
+            prompt_splits.append(prompts[start:end])
+            start_indices.append(start)
+            print(f"  GPU {i}: {len(prompt_splits[-1])} prompts (indices {start} to {end-1})")
 
-    # Print summary
-    if lora_info:
-        print(f"\nLoRA Info:")
-        print(f"  Rank: {lora_info['lora_rank']}")
-        print(f"  Alpha: {lora_info['lora_alpha']}")
-        print(f"  Step: {lora_info['step']}")
-        print(f"  Epoch: {lora_info['epoch']}")
+        # Launch workers
+        print(f"\nLaunching {num_gpus} workers...")
+        mp.set_start_method('spawn', force=True)
+
+        processes = []
+        for gpu_id in range(num_gpus):
+            p = mp.Process(
+                target=worker_generate,
+                args=(
+                    gpu_id,
+                    prompt_splits[gpu_id],
+                    args_dict,
+                    output_dir,
+                    start_indices[gpu_id],
+                    metadata,
+                )
+            )
+            p.start()
+            processes.append(p)
+
+        # Wait for all workers to complete
+        for p in processes:
+            p.join()
+
+    print("\n=== Generation Complete! ===")
+    print(f"Total images generated: {len(prompts)}")
+    print(f"Output directory: {output_dir}")
+    if args.output_format == "coco":
+        print(f"Format: COCO-style ({output_dir}/00000.png to {output_dir}/{len(prompts)-1:05d}.png)")
+    print("============================\n")
 
 
 if __name__ == "__main__":
