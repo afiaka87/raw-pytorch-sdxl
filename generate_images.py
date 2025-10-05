@@ -137,14 +137,14 @@ def worker_generate(
     # Load models on this GPU
     print(f"[GPU {gpu_id}] Loading models...")
 
-    # Load UNet
+    # Load UNet (load to CPU first, then apply LoRA, then move to device)
     unet = UNet2DConditionModel.from_pretrained(
         pretrained_model,
         torch_dtype=dtype,
-        device=device,
+        device='cpu',  # Load to CPU first
     )
 
-    # Apply LoRA if provided
+    # Apply LoRA if provided (before moving to GPU)
     if lora_checkpoint:
         print(f"[GPU {gpu_id}] Applying LoRA from {lora_checkpoint}...")
         unet, lora_info = load_and_apply_lora(
@@ -153,6 +153,9 @@ def worker_generate(
             device=device,
             dtype=dtype,
         )
+    else:
+        # Move to device if no LoRA
+        unet = unet.to(device)
 
     # Set to eval mode for inference
     unet.eval()
