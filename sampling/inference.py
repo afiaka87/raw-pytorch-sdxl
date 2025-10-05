@@ -107,9 +107,10 @@ def generate(
         latents_shape, generator=generator, device=device, dtype=dtype
     )
 
-    # Scale initial noise
+    # Scale initial noise (Euler only)
     scheduler.set_timesteps(num_inference_steps, device=device)
-    latents = latents * scheduler.sigmas[0]
+    if hasattr(scheduler, 'sigmas'):
+        latents = latents * scheduler.sigmas[0]
 
     # Prepare additional conditioning
     from sdxl.text_encoders import get_add_time_ids
@@ -126,36 +127,82 @@ def generate(
     if do_cfg:
         add_time_ids = torch.cat([add_time_ids, add_time_ids])
 
-    # Denoising loop
-    for i, t in enumerate(scheduler.timesteps):
-        # Expand latents for CFG
-        latent_model_input = torch.cat([latents, latents]) if do_cfg else latents
+    # Use validation-style sampling for consistency with training
+    if type(scheduler).__name__ == 'DDIMScheduler':
+        # Use custom DDIM like validation code
+        timesteps = torch.linspace(
+            scheduler.num_train_timesteps - 1,
+            0,
+            num_inference_steps,
+            device=device,
+        ).long()
+        alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
-        # Prepare conditioning
-        added_cond_kwargs = {
-            "text_embeds": pooled_embeds,
-            "time_ids": add_time_ids,
-        }
+        for i, t in enumerate(timesteps):
+            # Expand latents for CFG
+            latent_model_input = torch.cat([latents, latents]) if do_cfg else latents
+            t_batch = t.unsqueeze(0).repeat(latent_model_input.shape[0])
 
-        # Predict noise
-        noise_pred = unet(
-            latent_model_input,
-            t,
-            prompt_embeds,
-            added_cond_kwargs=added_cond_kwargs,
-        )[0]
+            # Prepare conditioning
+            added_cond_kwargs = {
+                "text_embeds": pooled_embeds,
+                "time_ids": add_time_ids,
+            }
 
-        # Classifier-free guidance
-        if do_cfg:
-            noise_pred_neg, noise_pred_pos = noise_pred.chunk(2)
-            noise_pred = noise_pred_neg + guidance_scale * (
-                noise_pred_pos - noise_pred_neg
-            )
+            # Predict noise
+            noise_pred = unet(
+                latent_model_input,
+                t_batch,
+                prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+            )[0]
 
-        # Scheduler step
-        # Note: EulerDiscreteScheduler expects index i, DDIMScheduler expects timestep value t
-        timestep_arg = t if type(scheduler).__name__ == 'DDIMScheduler' else i
-        latents = scheduler.step(noise_pred, timestep_arg, latents)
+            # Apply CFG
+            if do_cfg:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            # DDIM step (validation-style)
+            alpha_prod_t = alphas_cumprod[t]
+            alpha_prod_t_prev = alphas_cumprod[timesteps[i + 1]] if i < len(timesteps) - 1 else torch.tensor(1.0, device=device)
+
+            # Predict x0
+            pred_original_sample = (latents - torch.sqrt(1 - alpha_prod_t) * noise_pred) / torch.sqrt(alpha_prod_t)
+
+            # Direction pointing to x_t
+            pred_sample_direction = torch.sqrt(1 - alpha_prod_t_prev) * noise_pred
+
+            # x_{t-1}
+            latents = torch.sqrt(alpha_prod_t_prev) * pred_original_sample + pred_sample_direction
+    else:
+        # Euler or other schedulers
+        for i, t in enumerate(scheduler.timesteps):
+            # Expand latents for CFG
+            latent_model_input = torch.cat([latents, latents]) if do_cfg else latents
+
+            # Prepare conditioning
+            added_cond_kwargs = {
+                "text_embeds": pooled_embeds,
+                "time_ids": add_time_ids,
+            }
+
+            # Predict noise
+            noise_pred = unet(
+                latent_model_input,
+                t,
+                prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+            )[0]
+
+            # Classifier-free guidance
+            if do_cfg:
+                noise_pred_neg, noise_pred_pos = noise_pred.chunk(2)
+                noise_pred = noise_pred_neg + guidance_scale * (
+                    noise_pred_pos - noise_pred_neg
+                )
+
+            # Scheduler step (Euler uses index)
+            latents = scheduler.step(noise_pred, i, latents)
 
     # Decode latents
     latents = latents.to(torch.float32)  # VAE in FP32
@@ -435,9 +482,10 @@ def generate_unique_batch(
         latents_list.append(latent)
     latents = torch.cat(latents_list, dim=0)
 
-    # Scale initial noise
+    # Scale initial noise (Euler only)
     scheduler.set_timesteps(num_inference_steps, device=device)
-    latents = latents * scheduler.sigmas[0]
+    if hasattr(scheduler, 'sigmas'):
+        latents = latents * scheduler.sigmas[0]
 
     # Prepare additional conditioning
     from sdxl.text_encoders import get_add_time_ids
@@ -454,34 +502,80 @@ def generate_unique_batch(
     if do_cfg:
         add_time_ids = torch.cat([add_time_ids, add_time_ids])
 
-    # Denoising loop - process all images in parallel
-    for i, t in enumerate(scheduler.timesteps):
-        # Expand latents for CFG
-        latent_model_input = torch.cat([latents, latents]) if do_cfg else latents
+    # Use validation-style sampling for consistency with training
+    if type(scheduler).__name__ == 'DDIMScheduler':
+        # Use custom DDIM like validation code
+        timesteps = torch.linspace(
+            scheduler.num_train_timesteps - 1,
+            0,
+            num_inference_steps,
+            device=device,
+        ).long()
+        alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
-        # Prepare conditioning
-        added_cond_kwargs = {
-            "text_embeds": pooled_embeds,
-            "time_ids": add_time_ids,
-        }
+        for i, t in enumerate(timesteps):
+            # Expand latents for CFG
+            latent_model_input = torch.cat([latents, latents]) if do_cfg else latents
+            t_batch = t.unsqueeze(0).repeat(latent_model_input.shape[0])
 
-        # Predict noise for all images at once
-        noise_pred = unet(
-            latent_model_input,
-            t,
-            prompt_embeds,
-            added_cond_kwargs=added_cond_kwargs,
-        )[0]
+            # Prepare conditioning
+            added_cond_kwargs = {
+                "text_embeds": pooled_embeds,
+                "time_ids": add_time_ids,
+            }
 
-        # Apply classifier-free guidance
-        if do_cfg:
-            noise_pred_neg, noise_pred_pos = noise_pred.chunk(2)
-            noise_pred = noise_pred_neg + guidance_scale * (noise_pred_pos - noise_pred_neg)
+            # Predict noise for all images at once
+            noise_pred = unet(
+                latent_model_input,
+                t_batch,
+                prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+            )[0]
 
-        # Scheduler step for all images
-        # Note: EulerDiscreteScheduler expects index i, DDIMScheduler expects timestep value t
-        timestep_arg = t if type(scheduler).__name__ == 'DDIMScheduler' else i
-        latents = scheduler.step(noise_pred, timestep_arg, latents)
+            # Apply CFG
+            if do_cfg:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            # DDIM step (validation-style)
+            alpha_prod_t = alphas_cumprod[t]
+            alpha_prod_t_prev = alphas_cumprod[timesteps[i + 1]] if i < len(timesteps) - 1 else torch.tensor(1.0, device=device)
+
+            # Predict x0
+            pred_original_sample = (latents - torch.sqrt(1 - alpha_prod_t) * noise_pred) / torch.sqrt(alpha_prod_t)
+
+            # Direction pointing to x_t
+            pred_sample_direction = torch.sqrt(1 - alpha_prod_t_prev) * noise_pred
+
+            # x_{t-1}
+            latents = torch.sqrt(alpha_prod_t_prev) * pred_original_sample + pred_sample_direction
+    else:
+        # Euler or other schedulers
+        for i, t in enumerate(scheduler.timesteps):
+            # Expand latents for CFG
+            latent_model_input = torch.cat([latents, latents]) if do_cfg else latents
+
+            # Prepare conditioning
+            added_cond_kwargs = {
+                "text_embeds": pooled_embeds,
+                "time_ids": add_time_ids,
+            }
+
+            # Predict noise for all images at once
+            noise_pred = unet(
+                latent_model_input,
+                t,
+                prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+            )[0]
+
+            # Apply classifier-free guidance
+            if do_cfg:
+                noise_pred_neg, noise_pred_pos = noise_pred.chunk(2)
+                noise_pred = noise_pred_neg + guidance_scale * (noise_pred_pos - noise_pred_neg)
+
+            # Scheduler step for all images (Euler uses index)
+            latents = scheduler.step(noise_pred, i, latents)
 
     # Decode latents
     latents = latents.to(torch.float32)  # VAE in FP32
