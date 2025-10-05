@@ -153,7 +153,9 @@ def generate(
             )
 
         # Scheduler step
-        latents = scheduler.step(noise_pred, i, latents)
+        # Note: EulerDiscreteScheduler expects index i, DDIMScheduler expects timestep value t
+        timestep_arg = t if type(scheduler).__name__ == 'DDIMScheduler' else i
+        latents = scheduler.step(noise_pred, timestep_arg, latents)
 
     # Decode latents
     latents = latents.to(torch.float32)  # VAE in FP32
@@ -477,7 +479,9 @@ def generate_unique_batch(
             noise_pred = noise_pred_neg + guidance_scale * (noise_pred_pos - noise_pred_neg)
 
         # Scheduler step for all images
-        latents = scheduler.step(noise_pred, i, latents)
+        # Note: EulerDiscreteScheduler expects index i, DDIMScheduler expects timestep value t
+        timestep_arg = t if type(scheduler).__name__ == 'DDIMScheduler' else i
+        latents = scheduler.step(noise_pred, timestep_arg, latents)
 
     # Decode latents
     latents = latents.to(torch.float32)  # VAE in FP32
