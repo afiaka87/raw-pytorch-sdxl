@@ -176,10 +176,7 @@ def worker_generate(
 
     print(f"[GPU {gpu_id}] Generating {len(prompts)} images...")
 
-    # Generate images in batches
-    all_images = []
-    all_prompts = []
-
+    # Generate and save images in batches (no buffering)
     with torch.inference_mode():
         for batch_start in tqdm(range(0, len(prompts), batch_size), desc=f"GPU {gpu_id}"):
             batch_end = min(batch_start + batch_size, len(prompts))
@@ -227,18 +224,14 @@ def worker_generate(
                     seed=(seed + start_index + batch_start) if seed else None,
                 )
 
-            all_images.extend(images)
-            all_prompts.extend(used_prompts)
-
-    # Save images from this worker
-    print(f"[GPU {gpu_id}] Saving {len(all_images)} images...")
-    save_coco_style(
-        all_images,
-        all_prompts,
-        output_dir,
-        start_index=start_index,
-        metadata=metadata,
-    )
+            # Save immediately after generating each batch
+            save_coco_style(
+                images,
+                used_prompts,
+                output_dir,
+                start_index=start_index + batch_start,
+                metadata=metadata,
+            )
 
     print(f"[GPU {gpu_id}] Complete!")
 
