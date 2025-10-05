@@ -154,6 +154,9 @@ def worker_generate(
             dtype=dtype,
         )
 
+    # Set to eval mode for inference
+    unet.eval()
+
     # Load VAE (always FP32)
     from diffusers import AutoencoderKL
     vae = AutoencoderKL.from_pretrained(
