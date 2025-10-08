@@ -96,6 +96,10 @@ def parse_args():
     parser.add_argument("--precision", type=str, default="bf16",
                        choices=["fp32", "bf16", "fp16"],
                        help="Training precision")
+    parser.add_argument("--gradient_checkpointing", action="store_true", default=True,
+                       help="Enable gradient checkpointing (reduces VRAM by ~30-40%)")
+    parser.add_argument("--use_flash_attention", action="store_true", default=False,
+                       help="Enable Flash Attention for memory-efficient O(N) attention")
 
     # Image arguments
     parser.add_argument("--image_size", type=int, default=1024,
@@ -174,6 +178,10 @@ def main():
 
     print(f"Using device: {device}")
     print(f"Using dtype: {dtype}")
+    if args.use_flash_attention:
+        print("Flash Attention: ENABLED (memory-efficient O(N) attention)")
+    else:
+        print("Flash Attention: DISABLED (standard O(N²) attention)")
 
     # Create output directory
     output_dir = create_output_directory(args.output_dir)
@@ -197,9 +205,10 @@ def main():
             args.pretrained_model,
             torch_dtype=dtype,
             device=device,
+            use_flash_attention=args.use_flash_attention,
         )
     else:
-        unet = UNet2DConditionModel().to(device, dtype=dtype)
+        unet = UNet2DConditionModel(use_flash_attention=args.use_flash_attention).to(device, dtype=dtype)
 
     # Apply LoRA if requested (BEFORE gradient checkpointing!)
     if args.use_lora:
@@ -212,27 +221,27 @@ def main():
             target_mode=args.lora_target_mode,
         )
 
-    # Enable gradient checkpointing manually to save memory
-    # Wrap down/up blocks in checkpointing
+    # Enable gradient checkpointing if requested (to save memory)
     # IMPORTANT: This must be done AFTER LoRA is applied!
-    from torch.utils.checkpoint import checkpoint
+    if args.gradient_checkpointing:
+        from torch.utils.checkpoint import checkpoint
 
-    def make_checkpointed(module):
-        """Wrap a module's forward with gradient checkpointing"""
-        original_forward = module.forward
-        def checkpointed_forward(*args, **kwargs):
-            return checkpoint(original_forward, *args, **kwargs, use_reentrant=False)
-        module.forward = checkpointed_forward
-        return module
+        def make_checkpointed(module):
+            """Wrap a module's forward with gradient checkpointing"""
+            original_forward = module.forward
+            def checkpointed_forward(*args, **kwargs):
+                return checkpoint(original_forward, *args, **kwargs, use_reentrant=False)
+            module.forward = checkpointed_forward
+            return module
 
-    # Apply checkpointing to down/mid/up blocks
-    for block in unet.down_blocks:
-        make_checkpointed(block)
-    make_checkpointed(unet.mid_block)
-    for block in unet.up_blocks:
-        make_checkpointed(block)
+        # Apply checkpointing to down/mid/up blocks
+        for block in unet.down_blocks:
+            make_checkpointed(block)
+        make_checkpointed(unet.mid_block)
+        for block in unet.up_blocks:
+            make_checkpointed(block)
 
-    print("Enabled gradient checkpointing on UNet blocks")
+        print("Enabled gradient checkpointing on UNet blocks")
 
     # VAE (keep in FP32 for quality)
     # Use diffusers VAE since it's frozen (not part of training)
