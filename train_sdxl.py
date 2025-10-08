@@ -44,6 +44,8 @@ def parse_args():
     # Data arguments
     parser.add_argument("--data_dir", type=str, required=True, help="Training data directory")
     parser.add_argument("--val_data_dir", type=str, default=None, help="Validation data directory")
+    parser.add_argument("--images_only", action="store_true",
+                       help="Train on images without captions (uses empty captions)")
 
     # Model arguments
     parser.add_argument("--pretrained_model", type=str, default="./weights/sdxl-base-1.0",
@@ -85,6 +87,8 @@ def parse_args():
                        help="Max gradient norm for clipping")
     parser.add_argument("--min_snr_gamma", type=float, default=5.0,
                        help="Min-SNR gamma for loss weighting (None to disable, recommended: 5.0)")
+    parser.add_argument("--max_loss_value", type=float, default=1.0,
+                       help="Maximum loss value to prevent extreme losses from ruining weights (0 to disable)")
     parser.add_argument("--warmup_steps", type=int, default=500,
                        help="Number of warmup steps (0 to disable)")
 
@@ -322,6 +326,7 @@ def main():
         shuffle=True,
         center_crop=args.center_crop,
         random_flip=args.random_flip,
+        images_only=args.images_only,
     )
 
     val_dataloader = None
@@ -334,6 +339,7 @@ def main():
             shuffle=False,
             center_crop=args.center_crop,
             random_flip=False,
+            images_only=args.images_only,
         )
 
     # Resume from checkpoint
@@ -496,6 +502,7 @@ def main():
             image_size=args.image_size,
             save_interval=args.save_interval,
             save_callback=save_checkpoint_callback,
+            max_loss_value=args.max_loss_value if args.max_loss_value > 0 else None,
         )
 
         print(f"Epoch {epoch + 1} - Avg Loss: {avg_loss:.4f}")
