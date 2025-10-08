@@ -19,6 +19,7 @@ def train_step(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     min_snr_gamma: Optional[float] = None,
+    max_loss_value: Optional[float] = None,
 ) -> torch.Tensor:
     """
     Single training step.
@@ -148,6 +149,11 @@ def train_step(
     # Return mean loss
     loss = loss.mean()
 
+    # Clamp loss to prevent extreme values from ruining weights
+    # Especially important for out-of-distribution data or low-res training
+    if max_loss_value is not None:
+        loss = torch.clamp(loss, max=max_loss_value)
+
     return loss
 
 
@@ -175,6 +181,7 @@ def train_epoch(
     image_size: int = 512,
     save_interval: int = 0,
     save_callback: Optional[callable] = None,
+    max_loss_value: Optional[float] = None,
 ) -> tuple[float, int]:
     """
     Train for one epoch.
@@ -223,6 +230,7 @@ def train_epoch(
             device=device,
             dtype=dtype,
             min_snr_gamma=min_snr_gamma,
+            max_loss_value=max_loss_value,
         )
 
         # Scale loss for gradient accumulation
@@ -237,8 +245,16 @@ def train_epoch(
             # Compute gradient norm before clipping (for monitoring)
             grad_norm = torch.nn.utils.clip_grad_norm_(unet.parameters(), float('inf'))
 
+            # Safety check: skip update if gradients are extreme on first few steps
+            # This prevents out-of-distribution data from ruining weights
+            skip_update = False
+            if global_step < 10 and grad_norm > 10.0:
+                print(f"\n  WARNING: Skipping update at step {global_step} (grad_norm={grad_norm:.2f} too high)")
+                skip_update = True
+                optimizer.zero_grad()
+
             # Gradient clipping
-            if max_grad_norm > 0:
+            if not skip_update and max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(unet.parameters(), max_grad_norm)
 
             # Debug: Check if LoRA parameters have gradients
@@ -255,7 +271,8 @@ def train_epoch(
                 print(f"  DEBUG: LoRA params without gradients: {lora_params_without_grad}\n")
 
             # Optimizer step
-            optimizer.step()
+            if not skip_update:
+                optimizer.step()
             optimizer.zero_grad()
 
             # Update learning rate scheduler
