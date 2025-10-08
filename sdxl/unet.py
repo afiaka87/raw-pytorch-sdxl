@@ -101,10 +101,10 @@ class ResnetBlock2D(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with support for cross-attention."""
+    """Multi-head attention with support for cross-attention and Flash Attention."""
 
     def __init__(
-        self, inner_dim, cross_attention_dim=None, num_heads=None, dropout=0.0
+        self, inner_dim, cross_attention_dim=None, num_heads=None, dropout=0.0, use_flash_attention=False
     ):
         super().__init__()
         if num_heads is None:
@@ -115,6 +115,8 @@ class Attention(nn.Module):
             self.head_dim = inner_dim // num_heads
 
         self.scale = self.head_dim**-0.5
+        self.use_flash_attention = use_flash_attention
+
         if cross_attention_dim is None:
             cross_attention_dim = inner_dim
         self.to_q = nn.Linear(inner_dim, inner_dim, bias=False)
@@ -143,9 +145,21 @@ class Attention(nn.Module):
         k = k.view(k.size(0), k.size(1), self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(v.size(0), v.size(1), self.num_heads, self.head_dim).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn_weights = torch.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)
+        if self.use_flash_attention:
+            # Use PyTorch's scaled_dot_product_attention (Flash Attention)
+            # This is memory-efficient O(N) attention instead of O(N^2)
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=self.scale
+            )
+        else:
+            # Standard attention computation O(N^2)
+            scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            attn_weights = torch.softmax(scores, dim=-1)
+            attn_output = torch.matmul(attn_weights, v)
+
         attn_output = attn_output.transpose(1, 2).contiguous().view(b, t, c)
 
         for layer in self.to_out:
@@ -189,12 +203,12 @@ class FeedForward(nn.Module):
 class BasicTransformerBlock(nn.Module):
     """Transformer block with self-attention, cross-attention, and feed-forward."""
 
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, use_flash_attention=False):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-05, elementwise_affine=True)
-        self.attn1 = Attention(hidden_size)
+        self.attn1 = Attention(hidden_size, use_flash_attention=use_flash_attention)
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-05, elementwise_affine=True)
-        self.attn2 = Attention(hidden_size, 2048)
+        self.attn2 = Attention(hidden_size, 2048, use_flash_attention=use_flash_attention)
         self.norm3 = nn.LayerNorm(hidden_size, eps=1e-05, elementwise_affine=True)
         self.ff = FeedForward(hidden_size, hidden_size)
 
@@ -225,12 +239,12 @@ class BasicTransformerBlock(nn.Module):
 class Transformer2DModel(nn.Module):
     """2D Transformer for spatial attention in UNet."""
 
-    def __init__(self, in_channels, out_channels, n_layers):
+    def __init__(self, in_channels, out_channels, n_layers, use_flash_attention=False):
         super().__init__()
         self.norm = nn.GroupNorm(32, in_channels, eps=1e-06, affine=True)
         self.proj_in = nn.Linear(in_channels, out_channels, bias=True)
         self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(out_channels) for _ in range(n_layers)]
+            [BasicTransformerBlock(out_channels, use_flash_attention=use_flash_attention) for _ in range(n_layers)]
         )
         self.proj_out = nn.Linear(out_channels, out_channels, bias=True)
 
@@ -312,12 +326,12 @@ class DownBlock2D(nn.Module):
 class CrossAttnDownBlock2D(nn.Module):
     """Downsampling block with cross-attention."""
 
-    def __init__(self, in_channels, out_channels, n_layers, has_downsamplers=True):
+    def __init__(self, in_channels, out_channels, n_layers, has_downsamplers=True, use_flash_attention=False):
         super().__init__()
         self.attentions = nn.ModuleList(
             [
-                Transformer2DModel(out_channels, out_channels, n_layers),
-                Transformer2DModel(out_channels, out_channels, n_layers),
+                Transformer2DModel(out_channels, out_channels, n_layers, use_flash_attention=use_flash_attention),
+                Transformer2DModel(out_channels, out_channels, n_layers, use_flash_attention=use_flash_attention),
             ]
         )
         self.resnets = nn.ModuleList(
@@ -352,13 +366,13 @@ class CrossAttnDownBlock2D(nn.Module):
 class CrossAttnUpBlock2D(nn.Module):
     """Upsampling block with cross-attention."""
 
-    def __init__(self, in_channels, out_channels, prev_output_channel, n_layers):
+    def __init__(self, in_channels, out_channels, prev_output_channel, n_layers, use_flash_attention=False):
         super().__init__()
         self.attentions = nn.ModuleList(
             [
-                Transformer2DModel(out_channels, out_channels, n_layers),
-                Transformer2DModel(out_channels, out_channels, n_layers),
-                Transformer2DModel(out_channels, out_channels, n_layers),
+                Transformer2DModel(out_channels, out_channels, n_layers, use_flash_attention=use_flash_attention),
+                Transformer2DModel(out_channels, out_channels, n_layers, use_flash_attention=use_flash_attention),
+                Transformer2DModel(out_channels, out_channels, n_layers, use_flash_attention=use_flash_attention),
             ]
         )
         self.resnets = nn.ModuleList(
@@ -417,10 +431,10 @@ class UpBlock2D(nn.Module):
 class UNetMidBlock2DCrossAttn(nn.Module):
     """Middle block of UNet with cross-attention."""
 
-    def __init__(self, in_features):
+    def __init__(self, in_features, use_flash_attention=False):
         super().__init__()
         self.attentions = nn.ModuleList(
-            [Transformer2DModel(in_features, in_features, n_layers=10)]
+            [Transformer2DModel(in_features, in_features, n_layers=10, use_flash_attention=use_flash_attention)]
         )
         self.resnets = nn.ModuleList(
             [
@@ -453,7 +467,7 @@ class UNet2DConditionModel(nn.Module):
     - Output: 4-channel noise prediction
     """
 
-    def __init__(self):
+    def __init__(self, use_flash_attention=False):
         super().__init__()
 
         # Config for diffusers compatibility
@@ -473,12 +487,13 @@ class UNet2DConditionModel(nn.Module):
         self.down_blocks = nn.ModuleList(
             [
                 DownBlock2D(in_channels=320, out_channels=320),
-                CrossAttnDownBlock2D(in_channels=320, out_channels=640, n_layers=2),
+                CrossAttnDownBlock2D(in_channels=320, out_channels=640, n_layers=2, use_flash_attention=use_flash_attention),
                 CrossAttnDownBlock2D(
                     in_channels=640,
                     out_channels=1280,
                     n_layers=10,
                     has_downsamplers=False,
+                    use_flash_attention=use_flash_attention,
                 ),
             ]
         )
@@ -490,24 +505,26 @@ class UNet2DConditionModel(nn.Module):
                     out_channels=1280,
                     prev_output_channel=1280,
                     n_layers=10,
+                    use_flash_attention=use_flash_attention,
                 ),
                 CrossAttnUpBlock2D(
                     in_channels=320,
                     out_channels=640,
                     prev_output_channel=1280,
                     n_layers=2,
+                    use_flash_attention=use_flash_attention,
                 ),
                 UpBlock2D(in_channels=320, out_channels=320, prev_output_channel=640),
             ]
         )
 
-        self.mid_block = UNetMidBlock2DCrossAttn(1280)
+        self.mid_block = UNetMidBlock2DCrossAttn(1280, use_flash_attention=use_flash_attention)
         self.conv_norm_out = nn.GroupNorm(32, 320, eps=1e-05, affine=True)
         self.conv_act = nn.SiLU()
         self.conv_out = nn.Conv2d(320, 4, kernel_size=3, stride=1, padding=1)
 
     @classmethod
-    def from_pretrained(cls, pretrained_path, torch_dtype=None, device=None):
+    def from_pretrained(cls, pretrained_path, torch_dtype=None, device=None, use_flash_attention=False):
         """
         Load UNet from pretrained SDXL weights.
 
@@ -515,6 +532,7 @@ class UNet2DConditionModel(nn.Module):
             pretrained_path: Path to directory containing unet/diffusion_pytorch_model.safetensors
             torch_dtype: Target dtype (e.g., torch.bfloat16)
             device: Target device
+            use_flash_attention: Enable Flash Attention (memory-efficient attention)
 
         Returns:
             Loaded UNet model
@@ -523,7 +541,7 @@ class UNet2DConditionModel(nn.Module):
         from safetensors.torch import load_file
 
         # Create instance
-        model = cls()
+        model = cls(use_flash_attention=use_flash_attention)
 
         # Load weights
         weights_path = Path(pretrained_path) / "unet" / "diffusion_pytorch_model.safetensors"
