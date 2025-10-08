@@ -1,14 +1,17 @@
 uv run python train_sdxl.py \
-	--data_dir '/home/sam/Data/dalle-blog-data/captioned-dalle/' \
+	--data_dir '/home/sam/Data/pixel-art-images' \
+	--images_only \
         --use_lora \
         --lora_rank 16 \
         --lora_target_mode all \
-	--batch_size 64 \
-	--gradient_accumulation_steps 8 \
+	--batch_size 4 \
+	--gradient_accumulation_steps 32 \
 	--num_epochs 1 \
 	--learning_rate 1e-5 \
 	--min_snr_gamma 5.0 \
-	--warmup_steps 500 \
+	--max_loss_value 0.5 \
+	--warmup_steps 1000 \
+	--max_grad_norm 0.5 \
 	--precision bf16 \
 	--image_size 256 \
 	--center_crop \
