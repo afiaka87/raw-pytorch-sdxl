@@ -81,6 +81,11 @@ uv run python generate_images.py \
 - `--image_size`: Resolution (512 or 1024, default: 1024)
 - `--precision`: bf16 (recommended), fp16, or fp32
 
+### Memory Optimization
+- `--gradient_checkpointing`: Enable gradient checkpointing (default: ON, ~30-40% VRAM reduction)
+- `--use_flash_attention`: Enable Flash Attention (default: OFF, ~30-40% attention memory reduction)
+- `--8_bit_adam`: Use 8-bit AdamW optimizer (reduces optimizer memory ~75%)
+
 ### Checkpointing
 - `--output_dir`: Where to save outputs
 - `--save_interval`: Save every N epochs
@@ -93,12 +98,14 @@ uv run python generate_images.py \
 
 ## Memory Requirements
 
-At 512x512 resolution with LoRA rank 4:
+**512x512 with LoRA rank 4:**
 - ~7.5GB VRAM (BF16 + gradient checkpointing)
+- ~5GB VRAM (BF16 + gradient checkpointing + flash attention)
 - Training: ~4.5M parameters (0.17% of model)
 
-At 1024x1024 resolution:
+**1024x1024:**
 - Requires >12GB VRAM (recommended: 16GB+)
+- Flash attention can reduce by additional ~30-40%
 
 ## Output Files
 
