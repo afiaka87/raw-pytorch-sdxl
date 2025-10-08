@@ -37,7 +37,8 @@ class ImageCaptionDataset(Dataset):
         image_size: int = 1024,
         center_crop: bool = True,
         random_flip: bool = True,
-        image_extensions: tuple = (".jpg", ".jpeg", ".png", ".webp"),
+        image_extensions: tuple = (".jpg", ".jpeg", ".png", ".webp", ".gif"),
+        images_only: bool = False,
     ):
         """
         Args:
@@ -46,28 +47,46 @@ class ImageCaptionDataset(Dataset):
             center_crop: Whether to center crop images
             random_flip: Whether to randomly flip images horizontally
             image_extensions: Tuple of valid image extensions
+            images_only: If True, train on images without requiring captions
         """
         self.data_dir = Path(data_dir)
         self.image_size = image_size
         self.center_crop = center_crop
         self.random_flip = random_flip
+        self.images_only = images_only
 
         # Find all image files
         self.image_files = []
         for ext in image_extensions:
             self.image_files.extend(self.data_dir.glob(f"*{ext}"))
 
-        # Filter to only images with corresponding captions
+        if len(self.image_files) == 0:
+            raise ValueError(f"No images found in {data_dir}")
+
+        # Build pairs based on mode
         self.pairs = []
-        for img_path in self.image_files:
-            txt_path = img_path.with_suffix(".txt")
-            if txt_path.exists():
-                self.pairs.append((img_path, txt_path))
 
-        if len(self.pairs) == 0:
-            raise ValueError(f"No image-caption pairs found in {data_dir}")
+        if images_only:
+            # Images-only mode: use all images with empty captions
+            for img_path in self.image_files:
+                self.pairs.append((img_path, None))
+            print(f"Found {len(self.pairs)} images in images-only mode (no captions required)")
+        else:
+            # Normal mode: filter to only images with corresponding captions
+            for img_path in self.image_files:
+                txt_path = img_path.with_suffix(".txt")
+                if txt_path.exists():
+                    self.pairs.append((img_path, txt_path))
 
-        print(f"Found {len(self.pairs)} image-caption pairs in {data_dir}")
+            # Auto-detect: if no captions found but we have images, switch to images-only
+            if len(self.pairs) == 0 and len(self.image_files) > 0:
+                print(f"No .txt captions found. Auto-enabling images-only mode with empty captions.")
+                for img_path in self.image_files:
+                    self.pairs.append((img_path, None))
+            elif len(self.pairs) == 0:
+                raise ValueError(f"No image-caption pairs found in {data_dir}")
+            else:
+                print(f"Found {len(self.pairs)} image-caption pairs in {data_dir}")
 
         # Setup transforms
         self.transform = self._build_transform()
@@ -101,7 +120,11 @@ class ImageCaptionDataset(Dataset):
 
         # Load image
         try:
-            image = Image.open(img_path).convert("RGB")
+            image = Image.open(img_path)
+            # For GIFs, extract first frame
+            if img_path.suffix.lower() == '.gif':
+                image.seek(0)  # Ensure we're on first frame
+            image = image.convert("RGB")
             image = self.transform(image)
         except Exception as e:
             print(f"Error loading image {img_path}: {e}")
@@ -109,12 +132,16 @@ class ImageCaptionDataset(Dataset):
             return self.__getitem__((idx + 1) % len(self))
 
         # Load caption
-        try:
-            with open(txt_path, "r") as f:
-                caption = f.read().strip()
-        except Exception as e:
-            print(f"Error loading caption {txt_path}: {e}")
+        if txt_path is None or not txt_path.exists():
+            # Images-only mode or missing caption file
             caption = ""
+        else:
+            try:
+                with open(txt_path, "r") as f:
+                    caption = f.read().strip()
+            except Exception as e:
+                print(f"Error loading caption {txt_path}: {e}")
+                caption = ""
 
         return {
             "image": image,
@@ -381,6 +408,7 @@ def create_dataloader(
     shuffle: bool = True,
     use_bucketing: bool = False,
     use_webdataset: bool = None,
+    images_only: bool = False,
     **dataset_kwargs,
 ) -> DataLoader:
     """
@@ -394,6 +422,7 @@ def create_dataloader(
         shuffle: Whether to shuffle data
         use_bucketing: Whether to use aspect ratio bucketing
         use_webdataset: Whether to use webdataset format (auto-detected if None)
+        images_only: Whether to train on images without requiring captions
         **dataset_kwargs: Additional arguments for dataset
 
     Returns:
@@ -428,6 +457,7 @@ def create_dataloader(
         dataset = ImageCaptionDataset(
             data_dir=data_dir,
             image_size=image_size,
+            images_only=images_only,
             **dataset_kwargs,
         )
         collate = collate_fn
