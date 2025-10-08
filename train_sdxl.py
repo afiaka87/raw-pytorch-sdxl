@@ -23,6 +23,7 @@ from training.train_loop import train_epoch, validate, train_step
 from training.ema import SimpleEMA
 from training.precision_util import get_dtype_from_str, print_memory_stats
 from training.lr_scheduler import WarmupScheduler
+from training.quantization import quantize_model, get_model_memory_footprint
 from training.train_util import (
     save_checkpoint,
     load_checkpoint,
@@ -100,6 +101,9 @@ def parse_args():
                        help="Enable gradient checkpointing (reduces VRAM by ~30-40%)")
     parser.add_argument("--use_flash_attention", action="store_true", default=False,
                        help="Enable Flash Attention for memory-efficient O(N) attention")
+    parser.add_argument("--quantize", type=str, default=None,
+                       choices=["int8", "4bit"],
+                       help="Quantize UNet weights (int8 or 4bit, requires bitsandbytes)")
 
     # Image arguments
     parser.add_argument("--image_size", type=int, default=1024,
@@ -210,7 +214,13 @@ def main():
     else:
         unet = UNet2DConditionModel(use_flash_attention=args.use_flash_attention).to(device, dtype=dtype)
 
-    # Apply LoRA if requested (BEFORE gradient checkpointing!)
+    # Apply quantization if requested (BEFORE LoRA!)
+    if args.quantize:
+        print(f"Model memory before quantization: {get_model_memory_footprint(unet):.2f} MB")
+        unet = quantize_model(unet, args.quantize, device)
+        print(f"Model memory after quantization: {get_model_memory_footprint(unet):.2f} MB")
+
+    # Apply LoRA if requested (AFTER quantization, BEFORE gradient checkpointing!)
     if args.use_lora:
         print(f"Applying LoRA (rank={args.lora_rank}, alpha={args.lora_alpha})...")
         unet = apply_lora_to_unet(
