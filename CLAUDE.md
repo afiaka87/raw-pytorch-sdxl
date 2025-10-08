@@ -35,8 +35,30 @@ uv run python train_sdxl.py \
   --pretrained_model ./weights/sdxl-base-1.0 \
   --image_size 512
 
+# Advanced training with validation and augmentation
+uv run python train_sdxl.py \
+  --data_dir my_dataset \
+  --use_lora \
+  --lora_rank 16 \
+  --lora_target_mode all \
+  --batch_size 4 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 1e-5 \
+  --min_snr_gamma 5.0 \
+  --warmup_steps 500 \
+  --center_crop \
+  --random_flip \
+  --validation_caption_file captions.txt \
+  --validation_interval 100 \
+  --num_validation_images 16 \
+  --wandb_project my-project \
+  --save_interval 100
+
 # Resume from LoRA checkpoint
 uv run python resume_training.py --auto checkpoints/latest/ --execute
+
+# Using shell scripts (see train_sdxl.sh for example configuration)
+./train_sdxl.sh
 ```
 
 ### Inference & Generation
@@ -107,10 +129,11 @@ mypy .
 
 1. **LoRA Implementation** (`sdxl/lora.py`)
    - Custom LoRA without peft dependency
-   - Freeze base model FIRST, then apply LoRA, then unfreeze LoRA params (order matters!)
+   - **CRITICAL ORDER**: Freeze base model FIRST, then apply LoRA, then unfreeze LoRA params
    - LoRA layers must be moved to same device/dtype as base layer during init
    - `apply_lora_to_unet()` creates `LoRALinearWrapper` that wraps frozen Linear layers
    - `get_lora_state_dict()` extracts only LoRA weights for saving
+   - **Recent fix**: Apply LoRA before moving UNet to GPU (prevents parameter mismatch)
 
 2. **Gradient Checkpointing** (`train_sdxl.py:170-185`)
    - Applied to UNet down_blocks, mid_block, and up_blocks
@@ -137,6 +160,12 @@ mypy .
    - Requires `add_time_ids` for original_size, crops_coords, target_size
    - `added_cond_kwargs` passed to UNet with text_embeds (pooled) and time_ids
 
+7. **Validation During Training**
+   - Generates sample images at specified intervals using current LoRA weights
+   - UNet switched to eval mode during validation (`unet.eval()`)
+   - Uses DDIM sampling by default (25 steps)
+   - **Recent fix**: DDIM sampling now matches validation code used during training
+
 ## Memory Optimization
 
 ### VRAM Requirements (with LoRA)
@@ -160,6 +189,7 @@ Total:                      ~7.5GB
 - VAE frozen (always FP32)
 - EMA disabled by default (~2x VRAM)
 - 512x512 resolution required for <12GB VRAM
+- Lower resolutions (256x256) can fit larger batch sizes and higher ranks
 
 ## Dataset Format
 
@@ -194,15 +224,38 @@ WebDataset format is **auto-detected** if .tar files are present in the data dir
 - `--lora_rank`: Default 8, use 4 for <12GB VRAM (lower = fewer params)
 - `--lora_alpha`: Default 32 (scaling factor)
 - `--lora_target_mode`: attention/attention_out/all (which layers to target)
+- `--lora_dropout`: Default 0.0 (dropout rate for LoRA layers)
 
 **Memory-Critical**:
-- `--image_size`: 512 (for <12GB), 1024 (for 16GB+)
+- `--image_size`: 256/512/768/1024 (512 for <12GB, 1024 for 16GB+)
 - `--precision`: bf16 (recommended), fp16, fp32
 - `--use_ema`: Disabled by default (requires ~2x VRAM)
+- `--8_bit_adam`: Use 8-bit AdamW from bitsandbytes (saves optimizer memory)
 
 **Training**:
 - `--batch_size`: Per-GPU batch size (default 1)
 - `--gradient_accumulation_steps`: Effective batch = batch_size × this
+- `--learning_rate`: Default 1e-4
+- `--min_snr_gamma`: Min-SNR loss weighting (default 5.0, improves training stability)
+- `--max_loss_value`: Maximum loss clamp to prevent weight damage (default 1.0, 0 to disable)
+- `--warmup_steps`: LR warmup steps (default 500, 0 to disable)
+- `--max_grad_norm`: Gradient clipping (default 1.0)
+- `--adam_weight_decay`: AdamW weight decay (default 1e-2)
+
+**Data Augmentation**:
+- `--center_crop`: Center crop images to target size
+- `--random_flip`: Random horizontal flip (enabled by default)
+
+**Validation**:
+- `--validation_caption_file`: Text file with validation prompts (one per line)
+- `--validation_interval`: Generate validation images every N steps (0 to disable)
+- `--num_validation_images`: Number of validation images per checkpoint (default 4)
+- `--validation_guidance_scale`: CFG scale for validation (default 7.5)
+
+**Checkpointing**:
+- `--save_interval`: Save checkpoint every N steps (critical for large datasets)
+- `--output_dir`: Output directory for checkpoints and logs
+- `--resume_from`: Resume training from checkpoint path
 
 ## Output Files
 
@@ -232,19 +285,24 @@ Each numbered basename groups related files (image, caption, metadata).
 ## Common Issues & Solutions
 
 ### Training Issues
-1. **OOM on 1024x1024**: Reduce to 512x512 or increase VRAM
+1. **OOM on 1024x1024**: Reduce to 512x512 or increase VRAM, consider 256x256 for very limited VRAM
 2. **LoRA params not training**: Check freeze order (freeze base → apply LoRA → unfreeze LoRA)
-3. **LoRA on CPU**: LoRA layers created before device move - fixed in current impl
+3. **LoRA on CPU**: LoRA layers created before device move - **FIXED** in b2d8f22
 4. **Dtype mismatches**: Ensure manual dtype conversion in forward passes
 5. **VAE architecture mismatch**: Always use diffusers VAE, not custom implementation
 6. **Checkpoints not saving**: Ensure `--save_interval` is set for step-based saving with large datasets
+7. **Training unstable**: Try `--min_snr_gamma 5.0` and `--warmup_steps 500` for better stability
+8. **Memory pressure**: Enable `--8_bit_adam` to reduce optimizer memory usage
+9. **Loss spikes >1.0 early**: Use `--max_loss_value 1.0` to clamp extreme losses from out-of-distribution data
 
 ### Inference Issues
-1. **CUDA index errors with batch>1**: Create fresh scheduler for each batch (scheduler state gets modified)
+1. **CUDA index errors with batch>1**: Create fresh scheduler for each batch - **FIXED** in 3823d8e
 2. **VAE decode returns DecoderOutput**: Access `.sample` attribute and divide by `vae.config.scaling_factor`
 3. **Text encoder dtype issues**: Use `torch_dtype` parameter, not `dtype`
 4. **Batch processing different prompts**: Use `generate_unique_batch()` not standard `generate()`
 5. **LoRA not applying**: Ensure `apply_lora_to_unet()` called AFTER freezing base model
+6. **Different outputs after loading**: Ensure UNet in eval mode with `unet.eval()` - **FIXED** in f0d9c52
+7. **DDIM sampling mismatch**: Scheduler timesteps corrected - **FIXED** in ddc5cf6
 
 ## Inference & Generation Pipeline
 
@@ -305,6 +363,16 @@ Based on observed patterns:
 - **Minimal friction**: Prefers auto-detection and sensible defaults over manual configuration
 - **Concise documentation**: Values brief, actionable information over verbose explanations
 - **Direct testing**: Prefers to test and validate code immediately rather than review first
+
+## Recent Bug Fixes & Improvements
+
+Critical fixes from recent commits (see git log for details):
+
+- **ddc5cf6**: Fixed DDIM sampling to match validation code used during training
+- **b2d8f22**: Fixed UNet loading order - apply LoRA before moving to GPU (prevents parameter mismatch)
+- **21948dc**: Save images immediately after each batch to avoid memory buildup during generation
+- **f0d9c52**: Add `unet.eval()` for inference mode (ensures consistent outputs)
+- **3823d8e**: Fix scheduler timestep argument mismatch for DDIM (prevents CUDA index errors)
 
 ## References
 
