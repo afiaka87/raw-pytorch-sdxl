@@ -215,7 +215,7 @@ def train_epoch(
         if 'lora' in n.lower() and p.requires_grad:
             initial_lora_params[n] = p.data.clone()
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     start_time = time.time()
 
@@ -251,7 +251,7 @@ def train_epoch(
             if global_step < 10 and grad_norm > 10.0:
                 print(f"\n  WARNING: Skipping update at step {global_step} (grad_norm={grad_norm:.2f} too high)")
                 skip_update = True
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
             # Gradient clipping
             if not skip_update and max_grad_norm > 0:
@@ -273,7 +273,7 @@ def train_epoch(
             # Optimizer step
             if not skip_update:
                 optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             # Update learning rate scheduler
             if lr_scheduler is not None:
@@ -283,35 +283,40 @@ def train_epoch(
             if ema_model is not None:
                 ema_model.update(unet)
 
+            # Periodically clear CUDA cache to prevent fragmentation
+            if global_step % 100 == 0:
+                torch.cuda.empty_cache()
+
             global_step += 1
 
-            # Logging
-            if global_step % log_interval == 0:
-                avg_loss = total_loss / num_batches
-                elapsed = time.time() - start_time
-                samples_per_sec = (batch_idx + 1) * batch["images"].shape[0] / elapsed
+            # Calculate metrics for logging
+            avg_loss = total_loss / num_batches
+            elapsed = time.time() - start_time
+            samples_per_sec = (batch_idx + 1) * batch["images"].shape[0] / elapsed
 
+            # Log to W&B every step
+            if wandb_run is not None:
+                from training.train_util import log_to_wandb, get_lr
+
+                log_to_wandb(
+                    {
+                        "train/loss": avg_loss,
+                        "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                        "train/samples_per_sec": samples_per_sec,
+                        "train/lr": get_lr(optimizer),
+                    },
+                    step=global_step,
+                    wandb_run=wandb_run,
+                )
+
+            # Console logging at log_interval
+            if global_step % log_interval == 0:
                 print(
                     f"Step {global_step} | "
                     f"Loss: {avg_loss:.4f} | "
                     f"Grad Norm: {grad_norm:.4f} | "
                     f"Samples/sec: {samples_per_sec:.2f}"
                 )
-
-                # Log to W&B
-                if wandb_run is not None:
-                    from training.train_util import log_to_wandb, get_lr
-
-                    log_to_wandb(
-                        {
-                            "train/loss": avg_loss,
-                            "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                            "train/samples_per_sec": samples_per_sec,
-                            "train/lr": get_lr(optimizer),
-                        },
-                        step=global_step,
-                        wandb_run=wandb_run,
-                    )
 
             # Validation image generation
             # Skip step 0 validation (no training has occurred yet)
