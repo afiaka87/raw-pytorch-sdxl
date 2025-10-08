@@ -194,9 +194,11 @@ Total:                      ~7.5GB
 ### Key Optimizations
 - **Gradient Checkpointing** (`--gradient_checkpointing`, default ON): Reduces VRAM by ~30-40%, ~20% slower
 - **Flash Attention** (`--use_flash_attention`, default OFF): Reduces attention memory by ~30-40%
+- **Quantization** (`--quantize int8` or `--quantize 4bit`): Reduces model weight memory by ~50-75%
 - **Mixed Precision** (`--precision bf16`): Halves activation/weight memory
 - **8-bit Adam** (`--8_bit_adam`): Reduces optimizer state by ~75%
 - **LoRA**: Only trains 0.17% of parameters (rank 4)
+- **Memory Optimizations**: `set_to_none=True` in zero_grad, periodic `torch.cuda.empty_cache()`, `pin_memory=True`
 
 ### Key Constraints
 - Text encoders frozen (unfreezing requires more memory)
@@ -245,6 +247,7 @@ WebDataset format is **auto-detected** if .tar files are present in the data dir
 - `--precision`: bf16 (recommended), fp16, fp32
 - `--gradient_checkpointing`: Enable gradient checkpointing (default ON, reduces VRAM ~30-40%)
 - `--use_flash_attention`: Enable Flash Attention (default OFF, reduces attention memory ~30-40%)
+- `--quantize`: Quantize UNet weights (int8 or 4bit, reduces model memory ~50-75%)
 - `--use_ema`: Disabled by default (requires ~2x VRAM)
 - `--8_bit_adam`: Use 8-bit AdamW from bitsandbytes (saves optimizer memory)
 

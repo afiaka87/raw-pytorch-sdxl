@@ -84,6 +84,7 @@ uv run python generate_images.py \
 ### Memory Optimization
 - `--gradient_checkpointing`: Enable gradient checkpointing (default: ON, ~30-40% VRAM reduction)
 - `--use_flash_attention`: Enable Flash Attention (default: OFF, ~30-40% attention memory reduction)
+- `--quantize`: Quantize UNet weights (int8 or 4bit, ~50-75% model memory reduction)
 - `--8_bit_adam`: Use 8-bit AdamW optimizer (reduces optimizer memory ~75%)
 
 ### Checkpointing
@@ -100,12 +101,13 @@ uv run python generate_images.py \
 
 **512x512 with LoRA rank 4:**
 - ~7.5GB VRAM (BF16 + gradient checkpointing)
-- ~5GB VRAM (BF16 + gradient checkpointing + flash attention)
+- ~5GB VRAM (+ flash attention)
+- ~3GB VRAM (+ flash attention + 4bit quantization)
 - Training: ~4.5M parameters (0.17% of model)
 
 **1024x1024:**
 - Requires >12GB VRAM (recommended: 16GB+)
-- Flash attention can reduce by additional ~30-40%
+- Flash attention + quantization can fit on 8GB VRAM
 
 ## Output Files
 
