@@ -133,6 +133,8 @@ def worker_generate(
     scheduler_type = args_dict['scheduler']
     dtype = args_dict['dtype']
     seed = args_dict.get('seed')
+    lora_weight = args_dict.get('lora_weight', 1.0)
+    use_flash_attention = args_dict.get('use_flash_attention', False)
 
     # Load models on this GPU
     print(f"[GPU {gpu_id}] Loading models...")
@@ -142,6 +144,7 @@ def worker_generate(
         pretrained_model,
         torch_dtype=dtype,
         device='cpu',  # Load to CPU first
+        use_flash_attention=use_flash_attention,
     )
 
     # Apply LoRA if provided (before moving to GPU)
@@ -208,6 +211,7 @@ def worker_generate(
                     device=device,
                     dtype=dtype,
                     seed=(seed + start_index + batch_start) if seed else None,
+                    lora_weight=lora_weight,
                 )
                 used_prompts = [batch_prompts[0]]
             else:
@@ -225,6 +229,7 @@ def worker_generate(
                     device=device,
                     dtype=dtype,
                     seed=(seed + start_index + batch_start) if seed else None,
+                    lora_weight=lora_weight,
                 )
 
             # Save immediately after generating each batch
@@ -306,6 +311,12 @@ def main():
         help="Classifier-free guidance scale",
     )
     parser.add_argument(
+        "--lora-weight",
+        type=float,
+        default=1.0,
+        help="LoRA weight scaling (0.0=disabled, 1.0=normal, >1.0=stronger, default=1.0)",
+    )
+    parser.add_argument(
         "--scheduler",
         type=str,
         choices=["euler", "ddim"],
@@ -352,6 +363,11 @@ def main():
         choices=["fp32", "fp16", "bf16"],
         default="bf16",
         help="Model precision",
+    )
+    parser.add_argument(
+        "--use-flash-attention",
+        action="store_true",
+        help="Enable Flash Attention for memory-efficient O(N) attention",
     )
 
     # Reproducibility
@@ -422,6 +438,7 @@ def main():
         metadata = {
             "model": args.pretrained_model,
             "lora_checkpoint": args.lora_checkpoint,
+            "lora_weight": args.lora_weight,
             "width": width,
             "height": height,
             "guidance_scale": args.guidance_scale,
@@ -435,6 +452,7 @@ def main():
     args_dict = {
         'pretrained_model': args.pretrained_model,
         'lora_checkpoint': args.lora_checkpoint,
+        'lora_weight': args.lora_weight,
         'width': width,
         'height': height,
         'batch_size': args.batch_size,
@@ -444,6 +462,7 @@ def main():
         'scheduler': args.scheduler,
         'dtype': dtype,
         'seed': args.seed,
+        'use_flash_attention': args.use_flash_attention,
     }
 
     if num_gpus == 1:
