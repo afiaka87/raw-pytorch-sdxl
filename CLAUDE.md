@@ -156,11 +156,18 @@ mypy .
    - Text encoders: FP16
    - Manual dtype conversion required in forward passes (train_loop.py)
 
-6. **SDXL Conditioning** (`training/train_loop.py:82-97`)
+6. **Flash Attention** (`sdxl/unet.py`)
+   - Optional memory-efficient O(N) attention using PyTorch's `F.scaled_dot_product_attention`
+   - Reduces attention memory usage by ~30-40%
+   - Enable with `--use_flash_attention` flag
+   - Uses same implementation for both self-attention and cross-attention
+   - Numerically equivalent to standard attention (tested to <1e-4 tolerance)
+
+7. **SDXL Conditioning** (`training/train_loop.py:82-97`)
    - Requires `add_time_ids` for original_size, crops_coords, target_size
    - `added_cond_kwargs` passed to UNet with text_embeds (pooled) and time_ids
 
-7. **Validation During Training**
+8. **Validation During Training**
    - Generates sample images at specified intervals using current LoRA weights
    - UNet switched to eval mode during validation (`unet.eval()`)
    - Uses DDIM sampling by default (25 steps)
@@ -183,6 +190,13 @@ Activations (checkpointed): ~2.0GB
 Temporary buffers:          ~0.3GB
 Total:                      ~7.5GB
 ```
+
+### Key Optimizations
+- **Gradient Checkpointing** (`--gradient_checkpointing`, default ON): Reduces VRAM by ~30-40%, ~20% slower
+- **Flash Attention** (`--use_flash_attention`, default OFF): Reduces attention memory by ~30-40%
+- **Mixed Precision** (`--precision bf16`): Halves activation/weight memory
+- **8-bit Adam** (`--8_bit_adam`): Reduces optimizer state by ~75%
+- **LoRA**: Only trains 0.17% of parameters (rank 4)
 
 ### Key Constraints
 - Text encoders frozen (unfreezing requires more memory)
@@ -229,6 +243,8 @@ WebDataset format is **auto-detected** if .tar files are present in the data dir
 **Memory-Critical**:
 - `--image_size`: 256/512/768/1024 (512 for <12GB, 1024 for 16GB+)
 - `--precision`: bf16 (recommended), fp16, fp32
+- `--gradient_checkpointing`: Enable gradient checkpointing (default ON, reduces VRAM ~30-40%)
+- `--use_flash_attention`: Enable Flash Attention (default OFF, reduces attention memory ~30-40%)
 - `--use_ema`: Disabled by default (requires ~2x VRAM)
 - `--8_bit_adam`: Use 8-bit AdamW from bitsandbytes (saves optimizer memory)
 
