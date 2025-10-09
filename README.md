@@ -14,7 +14,7 @@ This downloads `stabilityai/stable-diffusion-xl-base-1.0` to `./weights/`
 
 ### 2. Prepare your dataset
 
-Organize images and captions:
+**Regular Format** - Organize images and captions:
 ```
 my_dataset/
 ├── image1.jpg
@@ -22,6 +22,19 @@ my_dataset/
 ├── image2.jpg
 ├── image2.txt
 ...
+```
+
+**WebDataset Format** - For large-scale datasets (auto-detected):
+```
+my_dataset/
+├── shard_00000.tar
+├── shard_00001.tar
+...
+```
+
+Each tar contains paired image+caption files. Use glob patterns for easy loading:
+```bash
+--data_dir "/path/to/dataset/*.tar"
 ```
 
 ### 3. Train
@@ -86,6 +99,12 @@ uv run python generate_images.py \
 - `--use_flash_attention`: Enable Flash Attention (default: OFF, ~30-40% attention memory reduction)
 - `--quantize`: Quantize UNet weights (int8 or 4bit, ~50% model memory reduction, uses PyTorch INT8)
 - `--8_bit_adam`: Use 8-bit AdamW optimizer (reduces optimizer memory ~75%)
+
+### WebDataset
+- `--use_wds`: Force WebDataset mode (auto-detected if tar files present)
+- `--wds_image_key`: Image extensions (default: ".png;.jpg;.jpeg;.webp")
+- `--wds_caption_key`: Caption extensions (default: ".txt")
+- `--wds_tar_pairs`: Samples per tar for progress tracking (default: 10000)
 
 ### Checkpointing
 - `--output_dir`: Where to save outputs
