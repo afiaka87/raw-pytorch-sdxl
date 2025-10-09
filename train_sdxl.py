@@ -214,13 +214,7 @@ def main():
     else:
         unet = UNet2DConditionModel(use_flash_attention=args.use_flash_attention).to(device, dtype=dtype)
 
-    # Apply quantization if requested (BEFORE LoRA!)
-    if args.quantize:
-        print(f"Model memory before quantization: {get_model_memory_footprint(unet):.2f} MB")
-        unet = quantize_model(unet, args.quantize, device)
-        print(f"Model memory after quantization: {get_model_memory_footprint(unet):.2f} MB")
-
-    # Apply LoRA if requested (AFTER quantization, BEFORE gradient checkpointing!)
+    # Apply LoRA if requested (BEFORE quantization and gradient checkpointing!)
     if args.use_lora:
         print(f"Applying LoRA (rank={args.lora_rank}, alpha={args.lora_alpha})...")
         unet = apply_lora_to_unet(
@@ -230,6 +224,13 @@ def main():
             dropout=args.lora_dropout,
             target_mode=args.lora_target_mode,
         )
+
+    # Apply quantization if requested (AFTER LoRA, BEFORE gradient checkpointing!)
+    # This quantizes the base model weights while keeping LoRA weights in full precision
+    if args.quantize:
+        print(f"Model memory before quantization: {get_model_memory_footprint(unet):.2f} MB")
+        unet = quantize_model(unet, args.quantize, device)
+        print(f"Model memory after quantization: {get_model_memory_footprint(unet):.2f} MB")
 
     # Enable gradient checkpointing if requested (to save memory)
     # IMPORTANT: This must be done AFTER LoRA is applied!
