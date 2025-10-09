@@ -232,7 +232,23 @@ data_dir/
 ...
 ```
 
-WebDataset format is **auto-detected** if .tar files are present in the data directory. Each tar shard contains paired .png/.jpg and .txt files with matching basenames.
+WebDataset format is **auto-detected** if .tar files are present in the data directory. Each tar shard contains paired image and caption files with matching basenames.
+
+**Usage**:
+```bash
+# Auto-detect from directory
+uv run python train_sdxl.py --data_dir /path/to/shards/
+
+# Use glob pattern
+uv run python train_sdxl.py --data_dir "/path/to/shards/*.tar"
+
+# Custom image/caption extensions
+uv run python train_sdxl.py \
+  --data_dir "/path/to/shards/*.tar" \
+  --wds_image_key ".jpg;.png;.webp" \
+  --wds_caption_key ".txt" \
+  --wds_tar_pairs 10000  # Samples per tar for progress tracking
+```
 
 ## Key Training Arguments
 
@@ -264,6 +280,12 @@ WebDataset format is **auto-detected** if .tar files are present in the data dir
 **Data Augmentation**:
 - `--center_crop`: Center crop images to target size
 - `--random_flip`: Random horizontal flip (enabled by default)
+
+**WebDataset**:
+- `--use_wds`: Force use of WebDataset format (auto-detected if tar files present)
+- `--wds_image_key`: Semicolon-separated image extensions (default: ".png;.jpg;.jpeg;.webp")
+- `--wds_caption_key`: Semicolon-separated caption extensions (default: ".txt")
+- `--wds_tar_pairs`: Estimated samples per tar file for progress tracking (default: 10000)
 
 **Validation**:
 - `--validation_caption_file`: Text file with validation prompts (one per line)
@@ -332,6 +354,7 @@ Each numbered basename groups related files (image, caption, metadata).
    - Apply LoRA structure to UNet AFTER freezing base weights
    - Load LoRA state dict with `load_lora_state_dict()`
    - Move to target device/dtype after loading
+   - **LoRA Weight Scaling**: Use `lora_weight` parameter to control LoRA strength (0.0 = disabled, 1.0 = normal, >1.0 = stronger)
 
 2. **Unique-Pair Batch Processing**
    - Standard `generate()`: Multiple images from SAME prompt
