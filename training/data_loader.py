@@ -7,6 +7,7 @@ Supports:
 - Custom datasets with __getitem__ interface
 """
 
+import warnings
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
@@ -14,6 +15,10 @@ from pathlib import Path
 from typing import Optional, Callable, Tuple
 import torchvision.transforms as T
 import io
+
+# Suppress PIL warnings about palette transparency and decompression bombs
+warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 
 
 class ImageCaptionDataset(Dataset):
@@ -126,8 +131,8 @@ class ImageCaptionDataset(Dataset):
                 image.seek(0)  # Ensure we're on first frame
             image = image.convert("RGB")
             image = self.transform(image)
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
+        except Exception:
+            print(f"Image {img_path} is corrupted and couldn't be loaded.")
             # Return next item
             return self.__getitem__((idx + 1) % len(self))
 
@@ -207,8 +212,8 @@ class BucketedImageCaptionDataset(Dataset):
                     bucket = self._find_bucket(w, h)
                     self.pairs.append((img_path, txt_path, bucket))
                     self.bucket_indices[bucket].append(len(self.pairs) - 1)
-            except Exception as e:
-                print(f"Error processing {img_path}: {e}")
+            except Exception:
+                print(f"Image {img_path} is corrupted and couldn't be loaded.")
                 continue
 
         print(f"Found {len(self.pairs)} images in {len(self.buckets)} buckets:")
@@ -248,8 +253,8 @@ class BucketedImageCaptionDataset(Dataset):
             # To tensor and normalize
             image = T.functional.to_tensor(image)
             image = T.functional.normalize(image, [0.5], [0.5])
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
+        except Exception:
+            print(f"Image {img_path} is corrupted and couldn't be loaded.")
             return self.__getitem__((idx + 1) % len(self))
 
         # Load caption
@@ -275,6 +280,9 @@ def create_webdataset_loader(
     shuffle: bool = True,
     center_crop: bool = True,
     random_flip: bool = True,
+    image_keys: str = ".png;.jpg;.jpeg;.webp",
+    caption_keys: str = ".txt",
+    pairs_per_tar: int = 10000,
 ) -> DataLoader:
     """
     Create WebDataset loader for tar shards.
@@ -287,15 +295,26 @@ def create_webdataset_loader(
         shuffle: Whether to shuffle shards
         center_crop: Whether to center crop images
         random_flip: Whether to randomly flip images horizontally
+        image_keys: Semicolon-separated image extensions (e.g., ".png;.jpg;.webp")
+        caption_keys: Semicolon-separated caption extensions (e.g., ".txt")
+        pairs_per_tar: Estimated number of samples per tar file (for length calculation)
 
     Returns:
-        DataLoader instance
+        DataLoader instance with estimated length
     """
     import webdataset as wds
+    import glob as glob_module
 
     # Build list of shard URLs
-    data_path = Path(data_dir)
-    shard_files = sorted(data_path.glob("*.tar"))
+    # Support glob patterns in data_dir (e.g., "/path/to/data/*.tar")
+    if '*' in data_dir:
+        # Use glob to expand pattern
+        shard_files = sorted(glob_module.glob(data_dir))
+        shard_files = [Path(f) for f in shard_files if f.endswith('.tar')]
+    else:
+        # Treat as directory
+        data_path = Path(data_dir)
+        shard_files = sorted(data_path.glob("*.tar"))
 
     if len(shard_files) == 0:
         raise ValueError(f"No .tar files found in {data_dir}")
@@ -303,7 +322,14 @@ def create_webdataset_loader(
     # Convert to URLs (webdataset format)
     urls = [str(f) for f in shard_files]
 
+    # Parse image and caption keys (remove leading dots, split by semicolon)
+    image_exts = [key.lstrip('.') for key in image_keys.split(';')]
+    caption_exts = [key.lstrip('.') for key in caption_keys.split(';')]
+
     print(f"Found {len(urls)} webdataset shards in {data_dir}")
+    print(f"Image extensions: {image_exts}")
+    print(f"Caption extensions: {caption_exts}")
+    print(f"Estimated dataset size: {len(urls) * pairs_per_tar} samples ({pairs_per_tar} per tar)")
 
     def decode_sample(sample):
         """Decode webdataset sample to our format."""
@@ -313,7 +339,7 @@ def create_webdataset_loader(
 
         # Handle different image formats (after decode, no dot prefix)
         image = None
-        for ext in ['png', 'jpg', 'jpeg', 'webp']:
+        for ext in image_exts:
             if ext in sample:
                 image = sample[ext]
                 break
@@ -321,7 +347,14 @@ def create_webdataset_loader(
         if image is None:
             raise ValueError(f"No image found in sample with key {sample.get('__key__', 'unknown')}")
 
-        caption = sample.get('txt', '')
+        # Handle different caption formats
+        caption = ''
+        for ext in caption_exts:
+            if ext in sample:
+                caption = sample[ext]
+                if isinstance(caption, bytes):
+                    caption = caption.decode('utf-8')
+                break
 
         # Transform PIL image to tensor
         # Build transforms
@@ -363,6 +396,10 @@ def create_webdataset_loader(
         num_workers=num_workers,
         pin_memory=True,
     )
+
+    # Add estimated length to the loader for progress tracking
+    estimated_length = (len(urls) * pairs_per_tar) // batch_size
+    loader.estimated_length = estimated_length
 
     return loader
 
@@ -409,6 +446,9 @@ def create_dataloader(
     use_bucketing: bool = False,
     use_webdataset: bool = None,
     images_only: bool = False,
+    wds_image_keys: str = ".png;.jpg;.jpeg;.webp",
+    wds_caption_keys: str = ".txt",
+    wds_pairs_per_tar: int = 10000,
     **dataset_kwargs,
 ) -> DataLoader:
     """
@@ -423,6 +463,9 @@ def create_dataloader(
         use_bucketing: Whether to use aspect ratio bucketing
         use_webdataset: Whether to use webdataset format (auto-detected if None)
         images_only: Whether to train on images without requiring captions
+        wds_image_keys: Semicolon-separated image extensions for webdataset
+        wds_caption_keys: Semicolon-separated caption extensions for webdataset
+        wds_pairs_per_tar: Estimated samples per tar file for webdataset
         **dataset_kwargs: Additional arguments for dataset
 
     Returns:
@@ -430,8 +473,18 @@ def create_dataloader(
     """
     # Auto-detect webdataset format
     if use_webdataset is None:
-        data_path = Path(data_dir)
-        tar_files = list(data_path.glob("*.tar"))
+        import glob as glob_module
+
+        # Check if data_dir is a glob pattern or directory
+        if '*' in data_dir:
+            # Expand glob pattern and check for .tar files
+            expanded = glob_module.glob(data_dir)
+            tar_files = [f for f in expanded if f.endswith('.tar')]
+        else:
+            # Treat as directory
+            data_path = Path(data_dir)
+            tar_files = list(data_path.glob("*.tar"))
+
         use_webdataset = len(tar_files) > 0
 
     # Use webdataset if tar files are present
@@ -442,6 +495,9 @@ def create_dataloader(
             batch_size=batch_size,
             num_workers=num_workers,
             shuffle=shuffle,
+            image_keys=wds_image_keys,
+            caption_keys=wds_caption_keys,
+            pairs_per_tar=wds_pairs_per_tar,
             **dataset_kwargs,
         )
 
