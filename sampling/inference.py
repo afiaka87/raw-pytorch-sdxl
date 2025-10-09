@@ -28,6 +28,7 @@ def generate(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     seed: Optional[int] = None,
+    lora_weight: float = 1.0,
 ) -> List[Image.Image]:
     """
     Generate images from text prompts.
@@ -47,10 +48,15 @@ def generate(
         device: Device to use
         dtype: Data type
         seed: Random seed
+        lora_weight: LoRA weight scaling (0.0-2.0, default 1.0)
 
     Returns:
         List of PIL Images
     """
+    # Set LoRA weight
+    from sdxl.lora import set_lora_weight
+    set_lora_weight(unet, lora_weight)
+
     # Handle single vs batch prompts
     if isinstance(prompt, str):
         prompt = [prompt]
@@ -233,6 +239,7 @@ def generate_batch(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     seed: Optional[int] = None,
+    lora_weight: float = 1.0,
 ) -> List[Image.Image]:
     """
     Generate images for multiple prompts in batches.
@@ -251,6 +258,7 @@ def generate_batch(
         device: Device
         dtype: Data type
         seed: Random seed
+        lora_weight: LoRA weight scaling (0.0-2.0, default 1.0)
 
     Returns:
         List of PIL Images (one per prompt)
@@ -277,6 +285,7 @@ def generate_batch(
             device=device,
             dtype=dtype,
             seed=batch_seed,
+            lora_weight=lora_weight,
         )
 
         all_images.extend(images)
@@ -407,6 +416,7 @@ def generate_unique_batch(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     seed: Optional[int] = None,
+    lora_weight: float = 1.0,
 ) -> Tuple[List[Image.Image], List[str]]:
     """
     Generate images with unique prompts per batch item.
@@ -428,10 +438,15 @@ def generate_unique_batch(
         device: Device
         dtype: Data type
         seed: Random seed (base seed, each image gets seed+index)
+        lora_weight: LoRA weight scaling (0.0-2.0, default 1.0)
 
     Returns:
         (images, prompts) - images and their corresponding prompts
     """
+    # Set LoRA weight
+    from sdxl.lora import set_lora_weight
+    set_lora_weight(unet, lora_weight)
+
     batch_size = len(prompts)
 
     # Handle negative prompts

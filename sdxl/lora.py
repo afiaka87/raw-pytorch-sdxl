@@ -116,6 +116,7 @@ class LoRALinearWrapper(nn.Module):
         super().__init__()
         self.base_layer = base_layer
         self.lora_layer = lora_layer
+        self.lora_weight = 1.0  # Default LoRA weight scaling
 
         # Move LoRA to same device and dtype as base layer
         self.lora_layer = self.lora_layer.to(
@@ -133,10 +134,10 @@ class LoRALinearWrapper(nn.Module):
         self.bias = base_layer.bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass: base + LoRA"""
+        """Forward pass: base + LoRA * lora_weight"""
         base_out = self.base_layer(x)
         lora_out = self.lora_layer(x)
-        return base_out + lora_out
+        return base_out + lora_out * self.lora_weight
 
 
 def get_full_name(module: nn.Module, name: str, prefix: str = "") -> str:
@@ -250,6 +251,19 @@ def count_lora_parameters(model: nn.Module) -> tuple[int, int, float]:
     percentage = 100.0 * trainable / total if total > 0 else 0.0
 
     return trainable, total, percentage
+
+
+def set_lora_weight(model: nn.Module, weight: float = 1.0):
+    """
+    Set LoRA weight scaling for all LoRA layers.
+
+    Args:
+        model: Model with LoRA layers
+        weight: LoRA weight (0.0 = disabled, 1.0 = normal, >1.0 = stronger effect)
+    """
+    for module in model.modules():
+        if isinstance(module, LoRALinearWrapper):
+            module.lora_weight = weight
 
 
 def apply_lora_to_unet(
