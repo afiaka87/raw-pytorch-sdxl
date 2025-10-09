@@ -113,6 +113,16 @@ def parse_args():
     parser.add_argument("--random_flip", action="store_true", default=True,
                        help="Use random horizontal flip")
 
+    # WebDataset arguments
+    parser.add_argument("--use_wds", action="store_true",
+                       help="Force use of WebDataset format (auto-detected if tar files present)")
+    parser.add_argument("--wds_image_key", type=str, default=".png;.jpg;.jpeg;.webp",
+                       help="Semicolon-separated image extensions for WebDataset (e.g., '.png;.jpg;.webp')")
+    parser.add_argument("--wds_caption_key", type=str, default=".txt",
+                       help="Semicolon-separated caption extensions for WebDataset (e.g., '.txt')")
+    parser.add_argument("--wds_tar_pairs", type=int, default=10000,
+                       help="Estimated number of image-caption pairs per tar file (for progress tracking)")
+
     # EMA arguments (disabled by default due to VRAM constraints)
     parser.add_argument("--use_ema", action="store_true", default=False,
                        help="Use EMA (requires ~2x VRAM)")
@@ -347,6 +357,10 @@ def main():
         center_crop=args.center_crop,
         random_flip=args.random_flip,
         images_only=args.images_only,
+        use_webdataset=args.use_wds or None,
+        wds_image_keys=args.wds_image_key,
+        wds_caption_keys=args.wds_caption_key,
+        wds_pairs_per_tar=args.wds_tar_pairs,
     )
 
     val_dataloader = None
@@ -360,6 +374,10 @@ def main():
             center_crop=args.center_crop,
             random_flip=False,
             images_only=args.images_only,
+            use_webdataset=args.use_wds or None,
+            wds_image_keys=args.wds_image_key,
+            wds_caption_keys=args.wds_caption_key,
+            wds_pairs_per_tar=args.wds_tar_pairs,
         )
 
     # Resume from checkpoint
@@ -545,12 +563,19 @@ def main():
                 log_to_wandb({"val/loss": val_loss}, step=global_step, wandb_run=wandb_run)
 
         # Save checkpoint at epoch boundaries (every epoch for webdataset, or based on save_interval for regular datasets)
-        # WebDataset doesn't support len(), so we save every epoch
+        # WebDataset doesn't support len() directly, but we provide estimated_length
         try:
-            save_frequency = max(1, args.save_interval // len(train_dataloader))
+            # Try to get actual length
+            loader_len = len(train_dataloader)
+            save_frequency = max(1, args.save_interval // loader_len)
         except TypeError:
-            # WebDataset doesn't have len(), save every epoch
-            save_frequency = 1
+            # WebDataset doesn't have len(), check for estimated_length attribute
+            if hasattr(train_dataloader, 'estimated_length'):
+                loader_len = train_dataloader.estimated_length
+                save_frequency = max(1, args.save_interval // loader_len)
+            else:
+                # Fallback: save every epoch
+                save_frequency = 1
 
         if (epoch + 1) % save_frequency == 0:
             save_checkpoint_callback(global_step=global_step, epoch=epoch + 1)
